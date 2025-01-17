@@ -32,10 +32,23 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization")
         session = SESSIONS.get(token)
-        print(f"Session: {session}, Token: {token}")
-        if not session or session['expiry'] < datetime.now(timezone.utc):
-            print(f"Token expiry: {session['expiry']}, Current time: {datetime.now(timezone.utc)}")
-            return jsonify({"message": "Unauthorized"}), 403
+
+        # Debug logging for token and session
+        print(f"Authorization Token: {token}")
+        print(f"Session: {session}")
+
+        if not session:
+            print("Invalid or missing token.")
+            return jsonify({"message": "Unauthorized: Invalid or missing token."}), 403
+
+        # Check token expiry
+        current_time = datetime.now(timezone.utc)
+        if session['expiry'] < current_time:
+            print(f"Token expired. Expiry: {session['expiry']}, Current Time: {current_time}")
+            return jsonify({"message": "Unauthorized: Token has expired."}), 403
+
+        # Token is valid
+        print(f"Token is valid. Expiry: {session['expiry']}, Current Time: {current_time}")
         return f(*args, **kwargs)
 
     return decorated
