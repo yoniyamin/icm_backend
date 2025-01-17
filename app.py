@@ -18,7 +18,7 @@ bcrypt = Bcrypt(app)
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = bcrypt.generate_password_hash(os.getenv("ADMIN_PASSWORD", "admin123")).decode('utf-8')
-TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
+TOKEN_EXPIRY_SECONDS = 3600  # 2 hour
 
 # Initialize the database
 with app.app_context():
@@ -27,49 +27,52 @@ with app.app_context():
 # Simple in-memory session store (for demonstration purposes)
 SESSIONS = {}
 
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization")
-        session = SESSIONS.get(token)
-
-        # Debug logging for token and session
-        print(f"Authorization Token: {token}")
-        print(f"Session: {session}")
-
-        if not session:
-            print("Invalid or missing token.")
-            return jsonify({"message": "Unauthorized: Invalid or missing token."}), 403
-
-        # Check token expiry
-        current_time = datetime.now(timezone.utc)
-        if session['expiry'] < current_time:
-            print(f"Token expired. Expiry: {session['expiry']}, Current Time: {current_time}")
-            return jsonify({"message": "Unauthorized: Token has expired."}), 403
-
-        # Token is valid
-        print(f"Token is valid. Expiry: {session['expiry']}, Current Time: {current_time}")
+        if not token or not db.validate_session_token(token):
+            return jsonify({"message": "Unauthorized: Invalid or expired token."}), 403
         return f(*args, **kwargs)
-
     return decorated
+
+
+cleanup_counter = {"count": 0}
+@app.before_request
+def cleanup_sessions():
+    # Skip cleanup for public routes
+    if request.endpoint in ["login", "get_qr_code", "get_available_books"]:
+        return
+
+    # Periodic cleanup based on a counter
+    cleanup_counter["count"] += 1
+    if cleanup_counter["count"] >= 100:
+        print("Running periodic session cleanup")
+        db.remove_expired_tokens()
+        cleanup_counter["count"] = 0
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    """
-    Authenticate the user and issue a token with expiry.
-    """
     data = request.json
     username = data.get("username")
     password = data.get("password")
 
     if username == ADMIN_USERNAME and bcrypt.check_password_hash(ADMIN_PASSWORD_HASH, password):
         token = os.urandom(24).hex()
-        SESSIONS[token] = {
-            "expiry": datetime.now(timezone.utc) + timedelta(seconds=TOKEN_EXPIRY_SECONDS)
-        }
+        expiry_time = datetime.now(timezone.utc) + timedelta(seconds=TOKEN_EXPIRY_SECONDS)
+        expiry_time_iso = expiry_time.isoformat()  # Convert to ISO format
+
+        print(f"Generated token: {token}, Expiry time: {expiry_time_iso}")
+
+        # Store token in the database
+        message = db.store_session_token(token, expiry_time_iso)
+        print(f"Store message: {message}")
+
         return jsonify({"message": "Login successful", "token": token}), 200
     else:
         return jsonify({"message": "Invalid username or password"}), 401
+
 
 
 def send_email(to_email, subject, loan_details):

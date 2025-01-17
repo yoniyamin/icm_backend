@@ -77,5 +77,12 @@ def init_db():
             UPDATE members SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
         END;
         ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            expiry DATETIME NOT NULL
+        )
+        ''')
 
         conn.commit()

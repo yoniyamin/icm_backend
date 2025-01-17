@@ -2,7 +2,7 @@ import pandas as pd  # Add pandas import at the top
 import sqlite3
 import os
 import qrcode
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 from bidi.algorithm import get_display  # Correctly display RTL text
 from openpyxl import Workbook
@@ -10,6 +10,46 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 QR_CODE_DIR = "qr_codes"
+
+def store_session_token(token, expiry):
+    print(f"DEBUG: Storing token {token} with expiry {expiry}")
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO sessions (token, expiry) 
+        VALUES (?, ?)
+        ''', (token, expiry))
+        conn.commit()
+        return f"Token {token} stored with expiry {expiry}"
+
+
+def validate_session_token(token):
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT expiry FROM sessions WHERE token = ?
+        ''', (token,))
+        result = cursor.fetchone()
+        if result:
+            expiry = datetime.fromisoformat(result[0])  # Token expiry in UTC
+            current_time = datetime.now(timezone.utc)  # Current time in UTC
+            print(f"DEBUG: Token expiry: {expiry}, Current time: {current_time}")
+            if expiry > current_time:
+                return True  # Token is valid
+            else:
+                print("DEBUG: Token has expired.")
+    return False  # Token is invalid or expired
+
+
+def remove_expired_tokens():
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM sessions WHERE expiry < ?', (datetime.now(timezone.utc).isoformat(),))
+        deleted_rows = cursor.rowcount  # Get the number of rows deleted
+        conn.commit()
+        print(f"Expired tokens cleaned up: {deleted_rows}")
+        return deleted_rows
+
 
 def get_books(order_by="desc"):
     with sqlite3.connect("database.db") as conn:
