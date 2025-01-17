@@ -2,21 +2,60 @@
 import os
 import gunicorn
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import models
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 from services import database_service as db
-
+from flask_bcrypt import Bcrypt
+from functools import wraps
 
 app = Flask(__name__)
 CORS(app)
+bcrypt = Bcrypt(app)
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD_HASH = bcrypt.generate_password_hash(os.getenv("ADMIN_PASSWORD", "admin123")).decode('utf-8')
+TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
 
 # Initialize the database
 with app.app_context():
     models.init_db()
+
+# Simple in-memory session store (for demonstration purposes)
+SESSIONS = {}
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("Authorization")
+        session = SESSIONS.get(token)
+        if not session or session['expiry'] < datetime.now(timezone.utc):
+            return jsonify({"message": "Unauthorized"}), 403
+        return f(*args, **kwargs)
+
+    return decorated
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """
+    Authenticate the user and issue a token with expiry.
+    """
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+
+    if username == ADMIN_USERNAME and bcrypt.check_password_hash(ADMIN_PASSWORD_HASH, password):
+        token = os.urandom(24).hex()
+        SESSIONS[token] = {
+            "expiry": datetime.now(timezone.utc) + timedelta(seconds=TOKEN_EXPIRY_SECONDS)
+        }
+        return jsonify({"message": "Login successful", "token": token}), 200
+    else:
+        return jsonify({"message": "Invalid username or password"}), 401
+
 
 def send_email(to_email, subject, loan_details):
     """
@@ -77,6 +116,7 @@ def get_books():
 
 # Route to add a new book with all relevant fields
 @app.route("/api/books", methods=["POST"])
+@token_required
 def add_book():
     data = request.get_json()
     title = data.get("title")
@@ -132,6 +172,7 @@ def borrowing_history():
 
 # Endpoint to get all members
 @app.route("/api/members", methods=["GET"])
+@token_required
 def get_members():
     members = db.get_members()
     return jsonify(members)
@@ -139,6 +180,7 @@ def get_members():
 
 # Endpoint to add a new member
 @app.route("/api/members", methods=["POST"])
+@token_required
 def add_member():
     data = request.get_json()
     parent_name = data.get("parent_name")
@@ -172,6 +214,7 @@ def get_borrowed_books():
 
 
 @app.route('/api/book/borrow', methods=['POST'])
+@token_required
 def borrow_book():
     data = request.json
     qr_code = data.get('qr_code')
@@ -190,6 +233,7 @@ def borrow_book():
 
 
 @app.route('/api/book/return', methods=['POST'])
+@token_required
 def return_book():
     data = request.json
     print(data)
@@ -243,6 +287,7 @@ def inventory_report():
 
 
 @app.route('/api/send-reminder', methods=['POST'])
+@token_required
 def send_reminder():
     try:
         data = request.json
