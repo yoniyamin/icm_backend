@@ -32,7 +32,9 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get("Authorization")
         session = SESSIONS.get(token)
+        print(f"Session: {session}, Token: {token}")
         if not session or session['expiry'] < datetime.now(timezone.utc):
+            print(f"Token expiry: {session['expiry']}, Current time: {datetime.now(timezone.utc)}")
             return jsonify({"message": "Unauthorized"}), 403
         return f(*args, **kwargs)
 
