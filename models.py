@@ -6,23 +6,25 @@ def init_db():
 
         # Create the books table with updated fields
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS books (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,                            -- שם הספר
-            author TEXT NOT NULL,                           -- שם המחבר
-            description TEXT,                               -- תיאור
-            year_of_publication INTEGER,                    -- שנת הוצאה
-            cover_type TEXT CHECK (cover_type IN ('כריכה רכה', 'כריכה קשה', 'עמודים קשיחים', 'ספר עם בטריה')), -- סוג כריכה
-            pages INTEGER,                                  -- עמודים
-            recommended_age INTEGER,                        -- גיל מומלץ
-            book_condition TEXT CHECK (book_condition IN ('new', 'good', 'worn')) DEFAULT 'good', -- מצב הספר
-            loan_status TEXT DEFAULT 'available' CHECK (loan_status IN ('available', 'borrowed')), -- מצב השאלה
-            delivering_parent TEXT,                         -- שם ההורה המוסר
-            qr_code TEXT UNIQUE NOT NULL,                   -- QR code
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
+                        CREATE TABLE IF NOT EXISTS books (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            title TEXT NOT NULL,  -- Remains mandatory
+                            author TEXT,          -- Changed from NOT NULL
+                            description TEXT,
+                            year_of_publication INTEGER,
+                            cover_type TEXT CHECK (cover_type IN 
+                            ('כריכה רכה', 'כריכה קשה', 'עמודים קשיחים', 'ספר עם בטריה')),
+                            pages INTEGER,
+                            recommended_age INTEGER,
+                            book_condition TEXT CHECK (book_condition IN 
+                            ('כמו חדש', 'מצויין - בלאי בלתי מורגש', 'טוב - בלאי קל')) DEFAULT 'טוב - בלאי קל',
+                            loan_status TEXT DEFAULT 'available' CHECK (loan_status IN ('available', 'borrowed')),
+                            delivering_parent TEXT,
+                            qr_code TEXT UNIQUE NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                        ''')
 
         # Create the members table
         cursor.execute('''
