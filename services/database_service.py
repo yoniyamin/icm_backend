@@ -264,6 +264,76 @@ def borrow_book(qr_code, member_id, borrowed_date, book_state):
     return True
 
 
+def update_book(book_id, **kwargs):
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+
+    try:
+        # Filter allowed fields and prepare update parameters
+        allowed_fields = {
+            'title', 'author', 'description', 'year_of_publication',
+            'cover_type', 'pages', 'recommended_age', 'book_condition',
+            'delivering_parent'
+        }
+
+        update_fields = []
+        values = []
+
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                update_fields.append(f"{field} = ?")
+                values.append(value)
+
+        if not update_fields:
+            return None  # No valid fields to update
+
+        # Add book_id as the last parameter
+        values.append(book_id)
+
+        # Build the update query
+        query = f'''
+            UPDATE books 
+            SET {', '.join(update_fields)}
+            WHERE id = ?
+        '''
+
+        cursor.execute(query, values)
+        conn.commit()
+
+        # Return the updated book
+        cursor.execute('''
+            SELECT id, title, author, description, year_of_publication, cover_type, 
+                   pages, recommended_age, book_condition, loan_status, delivering_parent, qr_code
+            FROM books 
+            WHERE id = ?
+        ''', (book_id,))
+
+        book = cursor.fetchone()
+        if book:
+            return {
+                "id": book[0],
+                "title": book[1],
+                "author": book[2],
+                "description": book[3],
+                "year_of_publication": book[4],
+                "cover_type": book[5],
+                "pages": book[6],
+                "recommended_age": book[7],
+                "book_condition": book[8],
+                "loan_status": book[9],
+                "delivering_parent": book[10],
+                "qr_code": book[11]
+            }
+        return None
+
+    except sqlite3.Error as e:
+        print(f"Database error: {str(e)}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
 def return_book(qr_code):
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
@@ -318,6 +388,37 @@ def add_member(parent_name, kid_name, email):
         ''', (parent_name, kid_name, email))
         conn.commit()
 
+def update_member(member_id, parent_name, kid_name, email):
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE members 
+        SET parent_name = ?, kid_name = ?, email = ?
+        WHERE id = ?
+    ''', (parent_name, kid_name, email, member_id))
+    conn.commit()
+    conn.close()
+
+def delete_member(member_id):
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+
+    # Check if there are any open loans for this member
+    cursor.execute(
+        "SELECT COUNT(*) FROM loans WHERE member_id = ? AND returned_at IS NULL",
+        (member_id,)
+    )
+    open_loans_count = cursor.fetchone()[0]
+
+    if open_loans_count > 0:
+        conn.close()
+        # Instead of deleting, we raise an exception.
+        raise Exception("Cannot delete member with open loans.")
+
+    # Proceed to delete the member if no open loans
+    cursor.execute('DELETE FROM members WHERE id = ?', (member_id,))
+    conn.commit()
+    conn.close()
 
 def get_book_by_qr_code(qr_code):
     with sqlite3.connect("database.db") as conn:

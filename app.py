@@ -1,5 +1,7 @@
 # app.py
 import os
+import sqlite3
+
 import gunicorn
 import logging
 from datetime import datetime, timedelta, timezone
@@ -18,6 +20,7 @@ bcrypt = Bcrypt(app)
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = bcrypt.generate_password_hash(os.getenv("ADMIN_PASSWORD", "admin123")).decode('utf-8')
+print(f"ADMIN_USERNAME: {ADMIN_USERNAME}, ADMIN_PASSWORD_HASH: {ADMIN_PASSWORD_HASH}")
 TOKEN_EXPIRY_SECONDS = 3600  # 2 hour
 
 # Initialize the database
@@ -57,6 +60,7 @@ def login():
     data = request.json
     username = data.get("username")
     password = data.get("password")
+    print(f"Username: {username}, Password: {password}")
 
     if username == ADMIN_USERNAME and bcrypt.check_password_hash(ADMIN_PASSWORD_HASH, password):
         token = os.urandom(24).hex()
@@ -165,6 +169,42 @@ def add_book():
     return jsonify({"message": "Book added successfully", "qr_code": qr_code})
 
 
+@app.route("/api/books/<int:book_id>", methods=["PUT"])
+@token_required
+def update_book(book_id):
+    try:
+        data = request.get_json()
+        print(f"Updating book {book_id} with data: {data}")
+
+        # Build update parameters
+        update_fields = {}
+        allowed_fields = [
+            'title', 'author', 'description', 'year_of_publication',
+            'cover_type', 'pages', 'recommended_age', 'book_condition',
+            'delivering_parent'
+        ]
+
+        for field in allowed_fields:
+            if field in data:
+                update_fields[field] = data[field]
+
+        if not update_fields:
+            return jsonify({"error": "No valid fields provided for update"}), 400
+
+        # Update the book in the database
+        updated_book = db.update_book(book_id, **update_fields)
+
+        if not updated_book:
+            return jsonify({"error": "Book not found"}), 404
+
+        return jsonify(updated_book), 200
+
+    except sqlite3.IntegrityError as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 400
+    except Exception as e:
+        print(f"Error updating book: {str(e)}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 # Route to update book status
 @app.route("/api/books/<qr_code>/status", methods=["PUT"])
 def update_book_status(qr_code):
@@ -209,6 +249,26 @@ def add_member():
     db.add_member(parent_name, kid_name, email)
     return jsonify({"message": "Member added successfully"}), 201
 
+
+@app.route("/api/members/<int:member_id>", methods=["PUT", "DELETE"])
+@token_required
+def handle_member(member_id):
+    if request.method == "PUT":
+        data = request.get_json()
+        parent_name = data.get("parent_name")
+        kid_name = data.get("kid_name")
+        email = data.get("email")
+
+        db.update_member(member_id, parent_name, kid_name, email)
+        return jsonify({"message": "Member updated successfully"}), 200
+
+    elif request.method == "DELETE":
+        try:
+            db.delete_member(member_id)
+            return jsonify({"message": "Member deleted successfully"}), 200
+        except Exception as e:
+            # Log the error if needed, then return an error response
+            return jsonify({"error": str(e)}), 400
 
 @app.route('/api/book/<qr_code>', methods=['GET'])
 def get_book_by_qr_code(qr_code):
