@@ -1,0 +1,15 @@
+en:
+Dear {borrower_name},
+It's time to return the book "{book_title}" you borrowed on {borrowed_at}.
+Please return it as soon as possible so others can enjoy it too.
+
+Thanks,
+ICM Library Staff
+
+he:
+שלום {borrower_name},
+הגיע הזמן להחזיר את הספר "{book_title}" שהושאל בתאריך {borrowed_at}.
+אנא החזירו בהקדם האפשרי כדי שאחרים יוכלו ליהנות ממנו.
+
+בתודה,
+צוות ספריית הקהילה הישראלית במדריד
