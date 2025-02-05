@@ -32,7 +32,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_name TEXT NOT NULL,                      -- שם ההורה
             kid_name TEXT NOT NULL,                         -- שם הילד
-            email TEXT UNIQUE NOT NULL,                     -- אימייל
+            email TEXT ,                     -- אימייל
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )

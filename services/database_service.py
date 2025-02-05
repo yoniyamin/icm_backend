@@ -496,7 +496,7 @@ def get_loan_history(qr_code, show_all):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name
+            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
             FROM loans l
             JOIN books b ON l.book_id = b.id
             JOIN members m ON l.member_id = m.id
@@ -518,7 +518,7 @@ def get_all_open_loans():
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name
+            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
             FROM loans l
             JOIN books b ON l.book_id = b.id
             JOIN members m ON l.member_id = m.id
@@ -536,7 +536,7 @@ def get_all_loans():
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name
+            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
             FROM loans l
             JOIN books b ON l.book_id = b.id
             JOIN members m ON l.member_id = m.id

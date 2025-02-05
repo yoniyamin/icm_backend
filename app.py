@@ -60,7 +60,6 @@ def login():
     data = request.json
     username = data.get("username")
     password = data.get("password")
-    print(f"Username: {username}, Password: {password}")
 
     if username == ADMIN_USERNAME and bcrypt.check_password_hash(ADMIN_PASSWORD_HASH, password):
         token = os.urandom(24).hex()
@@ -79,28 +78,31 @@ def login():
 
 
 
-def send_email(to_email, subject, loan_details):
+def send_email(to_email, subject, loan_details, language='en'):
     """
-    Send an email using SendGrid API.
-    Uses a template loaded from the `get_reminder_template()` function.
+    Send an email using SendGrid API with language-specific template.
     """
-    # Load and format the template with dynamic loan details
-    template = get_reminder_template()
+    template = get_reminder_template(language)
     try:
-        # Format borrowed_at to only include the date (YYYY-MM-DD)
         if 'borrowed_at' in loan_details:
-            loan_details['borrowed_at'] = datetime.strptime(loan_details['borrowed_at'], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d')
-
-        body = template.format(**loan_details)  # Use borrower_name, book_title, borrowed_at directly
+            loan_details['borrowed_at'] = datetime.strptime(loan_details['borrowed_at'],
+                '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d')
+        body = template.format(**loan_details)
     except Exception as e:
         print(f"Template formatting failed: {e}. Loan details: {loan_details}")
         return False
 
+    # Apply RTL styles for Hebrew emails
+    if language == 'he':
+        body = f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
+    else:
+        body = f'<div dir="ltr" style="text-align: left; font-family: Arial, sans-serif;">{body}</div>'
+
     message = Mail(
-        from_email='icm.library.reminder@gmail.com',  # Use the verified email from SendGrid
+        from_email='icm.library.reminder@gmail.com',
         to_emails=to_email,
         subject=subject,
-        plain_text_content=body
+        html_content=body  # Ensure SendGrid renders it as HTML
     )
     try:
         sg = SendGridAPIClient(os.getenv('SENDGRID_API_KEY'))
@@ -110,6 +112,7 @@ def send_email(to_email, subject, loan_details):
     except Exception as e:
         print(f"Failed to send email: {e}")
         return False
+
 
 
 
@@ -328,7 +331,6 @@ def get_open_loans():
 
 @app.route('/api/loans/history', methods=['GET'])
 def get_loan_history():
-
     qr_code = request.args.get('qr_code', None)  # Get QR code, or None if not provided
     show_all = request.args.get('show_all', 'false').lower() == 'true'  # Parse show_all
     print(f"requesting for history on {qr_code}, showall is set to {show_all}")
@@ -340,6 +342,7 @@ def get_loan_history():
         # Fetch all open loans or all loans
         history = db.get_all_open_loans() if not show_all \
             else db.get_all_loans()
+    print(history)
     return jsonify(history)
 
 # Flask routes for generating reports
@@ -371,6 +374,7 @@ def send_reminder():
         data = request.json
         print(f"Request data: {data}")  # 🔥 Log entire request payload
         loan_id = data.get('loan_id')
+        language = data.get('language', 'en')
         if not loan_id:
             print("Missing loan_id")  # 🔥 Debug
             return jsonify({"success": False, "error": "Loan ID is required"}), 400
@@ -399,7 +403,7 @@ def send_reminder():
             return jsonify({"success": False, "error": "No email found for borrower"}), 404
 
         subject = data.get('subject', 'Reminder')
-        success = send_email(email, subject, loan_details)
+        success = send_email(email, subject, loan_details, language)
 
         if success:
             try:
@@ -437,20 +441,55 @@ def get_last_reminder(loan_id):
         return jsonify({"error": str(e)}), 500
 
 
-def get_reminder_template():
-    """
-    Load the email template for reminders.
-    """
+def get_reminder_template(language='en'):
     try:
         template_path = os.path.join(app.root_path, 'assets', 'template.txt')
-        with open(template_path, 'r') as file:
-            return file.read()
-    except Exception as e:
-        print("Unable to fetch template!")
-        return """Dear {borrower_name},
-        It's time to return the book "{book_title}" you borrowed on {borrowed_at}. 
-        Please return it as soon as possible so others can enjoy it too."""
+        with open(template_path, 'r', encoding='utf-8') as file:
+            templates = {}
+            current_lang = None
+            current_template = []
 
+            for line in file:
+                stripped_line = line.strip()  # Remove excess spaces/newlines
+                if stripped_line in ['en:', 'he:']:
+                    if current_lang:
+                        templates[current_lang] = '\n'.join(current_template).strip()
+                        current_template = []
+                    current_lang = stripped_line.replace(':', '')
+                elif current_lang:  # Only append if a language is selected
+                    current_template.append(line.rstrip())  # Strip trailing spaces
+
+            if current_lang:  # Save the last template
+                templates[current_lang] = '\n'.join(current_template).strip()
+
+            template = templates.get(language, templates['en'])
+
+            # Add text direction markers for Hebrew
+            if language == 'he':
+                return f"\u202B{template}\u202C"  # RTL embedding
+            return f"\u202A{template}\u202C"  # LTR embedding
+
+    except Exception as e:
+        print(f"Template error: {e}")
+        return get_default_template(language)
+
+
+def get_default_template(language):
+    templates = {
+        'en': """Dear {borrower_name},
+                It's time to return the book "{book_title}" you borrowed on {borrowed_at}.
+                Please return it as soon as possible so others can enjoy it too.
+
+                Thanks,
+                ICM Library Staff""",
+        'he': """\u202Bשלום {borrower_name},
+                הגיע הזמן להחזיר את הספר "{book_title}" שהושאל בתאריך {borrowed_at}.
+                אנא החזירו בהקדם האפשרי כדי שאחרים יוכלו ליהנות ממנו.
+
+                בתודה,
+                צוות ספריית הקהילה הישראלית במדריד\u202C"""
+    }
+    return templates.get(language, templates['en'])
 
 if __name__ == "__main__":
     app.run(debug=True)
