@@ -891,3 +891,15 @@ def fetch_last_reminder_date(loan_id):
         ''', (loan_id,))
         result = cursor.fetchone()
         return result["sent_at"] if result else None
+
+
+def delete_qr_code(qr_code_path):
+    """
+    Deletes a QR code file if the book insert fails.
+    """
+    try:
+        if qr_code_path and os.path.exists(qr_code_path):
+            os.remove(qr_code_path)
+            print(f"Deleted orphaned QR code: {qr_code_path}")
+    except Exception as e:
+        print(f"Failed to delete orphaned QR code {qr_code_path}: {str(e)}")

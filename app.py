@@ -151,25 +151,41 @@ def add_book():
     cover_type = data.get("cover_type")
     pages = data.get("pages")
     recommended_age = data.get("recommended_age")
-    book_condition = data.get("book_condition")
+    book_condition = data.get("book_condition") or "טוב - בלאי קל"
     loan_status = data.get("loan_status", "available")
     delivering_parent = data.get("delivering_parent")
-    print(data)
-    # Call the database service to add the book with all fields
-    qr_code = db.add_book(
-        title=title,
-        author=author,
-        description=description,
-        year_of_publication=year_of_publication,
-        cover_type=cover_type,
-        pages=pages,
-        recommended_age=recommended_age,
-        loan_status=loan_status,
-        book_condition=book_condition,
-        delivering_parent=delivering_parent
-    )
 
-    return jsonify({"message": "Book added successfully", "qr_code": qr_code})
+    print(f"Received data: {data}")
+    qr_code = None
+
+    try:
+        # Call the database service to add the book (which includes generating QR code)
+        qr_code = db.add_book(
+            title=title,
+            author=author,
+            description=description,
+            year_of_publication=year_of_publication,
+            cover_type=cover_type,
+            pages=pages,
+            recommended_age=recommended_age,
+            loan_status=loan_status,
+            book_condition=book_condition,
+            delivering_parent=delivering_parent
+        )
+
+        return jsonify({"message": "Book added successfully", "qr_code": qr_code})
+
+    except sqlite3.IntegrityError as e:
+        print(f"Database error: {str(e)}")
+        if qr_code:  # ✅ Only delete if QR code was actually created
+            db.delete_qr_code(qr_code)
+        return jsonify({"error": f"Database error: {str(e)}"}), 400
+
+    except Exception as e:
+        print(f"Error adding book: {str(e)}")
+        if qr_code:
+            db.delete_qr_code(qr_code)  # Ensure the QR code is deleted
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 
 @app.route("/api/books/<int:book_id>", methods=["PUT"])
