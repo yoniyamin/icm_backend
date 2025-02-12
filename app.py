@@ -1,11 +1,13 @@
 # app.py
 import os
+from io import BytesIO
 import sqlite3
+from reportsServices import generate_qr_pdf, QR_CODES_DIR, extract_qr_number
 
 import gunicorn
 import logging
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import models
 from sendgrid import SendGridAPIClient
@@ -363,6 +365,7 @@ def get_loan_history():
 
 # Flask routes for generating reports
 @app.route('/api/generate_books_report', methods=['GET'])
+@token_required
 def books_report():
     language = request.headers.get('Accept-Language', 'en')
     order_by = request.args.get('order_by', 'desc')
@@ -373,6 +376,7 @@ def books_report():
     return send_file(report_filename, as_attachment=True)
 
 @app.route('/api/generate_inventory_report', methods=['GET'])
+@token_required
 def inventory_report():
     language = request.headers.get('Accept-Language', 'en')
     order_by = request.args.get('order_by', 'desc')
@@ -506,6 +510,48 @@ def get_default_template(language):
                 צוות ספריית הקהילה הישראלית במדריד\u202C"""
     }
     return templates.get(language, templates['en'])
+
+@app.route('/api/qr_codes', methods=['GET'])
+@token_required  # Your token authentication decorator
+def get_qr_codes():
+    """
+    Returns a JSON array of available QR code filenames from the fixed QR_CODES_DIR.
+    This allows the frontend to know how many QR codes are available.
+    """
+    try:
+        qr_files = [
+            f for f in os.listdir(QR_CODES_DIR)
+            if f.endswith(".png") and extract_qr_number(f) is not None
+        ]
+        # Optionally, sort by the numeric value extracted from the filename.
+        qr_files.sort(key=lambda f: extract_qr_number(f))
+        return jsonify(qr_files)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+@app.route('/api/reports/qr_codes', methods=['POST'])
+@token_required
+def qr_codes_pdf_report():
+    """
+    Expects JSON in the request body with:
+      - start_qr: starting QR code number (integer).
+      - end_qr: ending QR code number (integer).
+    Returns a downloadable PDF file containing QR codes from the fixed qr_codes/ directory.
+    """
+    data = request.get_json()
+    try:
+        start_qr = int(data['start_qr'])
+        end_qr = int(data['end_qr'])
+
+        pdf_bytes = generate_qr_pdf(start_qr, end_qr)
+        return send_file(
+            BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name="qr_codes_printable.pdf"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
 
 if __name__ == "__main__":
     app.run(debug=True)

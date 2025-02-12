@@ -2,3 +2,4 @@ static/client_secret.json
 db_hospital
 venv
 .idea
+/database.db
