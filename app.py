@@ -254,6 +254,8 @@ def borrowing_history():
 @token_required
 def get_members():
     members = db.get_members()
+    for member in members:
+        member['borrowed_books_count'] = db.get_member_borrowed_books_count(member['id'])
     return jsonify(members)
 
 
@@ -290,6 +292,12 @@ def handle_member(member_id):
         except Exception as e:
             # Log the error if needed, then return an error response
             return jsonify({"error": str(e)}), 400
+
+@app.route("/api/members/<int:member_id>/loans", methods=["GET"])
+@token_required
+def get_member_loans(member_id):
+    loans = db.get_member_loans(member_id)
+    return jsonify({"member_id": member_id, "loans": loans})
 
 @app.route('/api/book/<qr_code>', methods=['GET'])
 def get_book_by_qr_code(qr_code):

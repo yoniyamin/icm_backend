@@ -903,3 +903,30 @@ def delete_qr_code(qr_code_path):
             print(f"Deleted orphaned QR code: {qr_code_path}")
     except Exception as e:
         print(f"Failed to delete orphaned QR code {qr_code_path}: {str(e)}")
+
+
+import sqlite3
+
+def get_member_loans(member_id):
+    """Retrieve books currently borrowed by a member."""
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT books.title, loans.borrowed_at
+            FROM loans
+            JOIN books ON loans.book_id = books.id
+            WHERE loans.member_id = ? AND loans.returned_at IS NULL
+        ''', (member_id,))
+        loans = cursor.fetchall()
+        return [{"book_title": loan[0], "borrowed_at": loan[1]} for loan in loans]
+
+def get_member_borrowed_books_count(member_id):
+    """Get the count of books currently borrowed by a member."""
+    with sqlite3.connect("database.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT COUNT(*) FROM loans
+            WHERE member_id = ? AND returned_at IS NULL
+        ''', (member_id,))
+        count = cursor.fetchone()[0]
+        return count
