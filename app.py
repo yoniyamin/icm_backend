@@ -6,6 +6,7 @@ from reportsServices import generate_qr_pdf, QR_CODES_DIR, extract_qr_number
 
 import gunicorn
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
@@ -15,7 +16,11 @@ from sendgrid.helpers.mail import Mail
 from services import database_service as db
 from flask_bcrypt import Bcrypt
 from functools import wraps
-
+import shutil
+from werkzeug.utils import secure_filename
+import tempfile
+from pathlib import Path
+import zipfile
 app = Flask(__name__)
 CORS(app)
 bcrypt = Bcrypt(app)
@@ -56,6 +61,7 @@ def cleanup_sessions():
         print("Running periodic session cleanup")
         db.remove_expired_tokens()
         cleanup_counter["count"] = 0
+
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -115,7 +121,179 @@ def send_email(to_email, subject, loan_details, language='en'):
         print(f"Failed to send email: {e}")
         return False
 
+@app.route('/api/database/backup', methods=['GET'])
+@token_required
+def backup_database():
+    """
+    Creates and sends a backup of the database file including WAL and SHM files.
+    Fixes potential file access conflicts by ensuring all handles are closed.
+    """
+    try:
+        db_path = Path(app.root_path) / 'database.db'
+        if not db_path.exists():
+            return jsonify({"error": "Database file not found"}), 404
 
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"library_backup_{timestamp}.zip"
+        backup_zip_path = Path(app.root_path) / backup_filename  # Save in app directory
+
+        # Backup DB safely using SQLite API
+        temp_backup_path = Path(app.root_path) / "temp_backup.db"
+        with sqlite3.connect(db_path) as source_conn, sqlite3.connect(temp_backup_path) as backup_conn:
+            source_conn.backup(backup_conn)
+            backup_conn.commit()
+
+        # Ensure the SQLite connections are closed before zipping
+        source_conn.close()
+        backup_conn.close()
+
+        # Create zip file outside of temporary directories
+        with zipfile.ZipFile(backup_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(temp_backup_path, arcname='database.db')
+
+            wal_path = db_path.with_suffix('.db-wal')
+            shm_path = db_path.with_suffix('.db-shm')
+
+            if wal_path.exists():
+                zipf.write(wal_path, arcname='database.db-wal')
+            if shm_path.exists():
+                zipf.write(shm_path, arcname='database.db-shm')
+
+        # Remove temp backup file (not the zip)
+        temp_backup_path.unlink(missing_ok=True)
+
+        # Ensure file is fully written before sending
+        if not backup_zip_path.exists():
+            return jsonify({"error": "Backup file not created"}), 500
+
+        # Send file (without deletion, let OS handle cleanup later)
+        return send_file(
+            backup_zip_path,
+            as_attachment=True,
+            download_name=backup_filename,
+            mimetype="application/zip"
+        )
+
+    except sqlite3.OperationalError as e:
+        return jsonify({"error": f"SQLite error: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Failed to create backup: {str(e)}"}), 500
+
+
+@app.route('/api/database/restore', methods=['POST'])
+@token_required
+def restore_database():
+    """
+    Restores the database from an uploaded backup zip file.
+    Ensures all SQLite connections are closed before overwriting.
+    """
+    try:
+        if 'backup_file' not in request.files:
+            return jsonify({"error": "No backup file provided"}), 400
+
+        file = request.files['backup_file']
+        if file.filename == '':
+            return jsonify({"error": "Empty filename"}), 400
+
+        filename = secure_filename(file.filename)
+        db_path = Path(app.root_path) / 'database.db'
+        wal_path = db_path.with_suffix('.db-wal')
+        shm_path = db_path.with_suffix('.db-shm')
+
+        # **🚨 Ensure all SQLite connections are forcefully closed**
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA wal_checkpoint(FULL);")  # Force WAL checkpoint
+            conn.execute("PRAGMA journal_mode=DELETE;")  # Disable WAL mode
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            print(f"Error closing database before restore: {e}")
+
+        # **💀 Kill all open database connections**
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("PRAGMA busy_timeout = 5000;")  # Wait up to 5 seconds
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.close()
+        except Exception as e:
+            print(f"Error ensuring database is unlocked: {e}")
+
+        # **🔴 Temporarily rename the old database to avoid locks**
+        temp_old_db = Path(app.root_path) / f"old_database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        if db_path.exists():
+            db_path.rename(temp_old_db)
+
+        # **🚀 Remove WAL & SHM files before restore**
+        wal_path.unlink(missing_ok=True)
+        shm_path.unlink(missing_ok=True)
+
+        # Backup old database just in case
+        backup_dir = Path(app.root_path) / f"db_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        backup_dir.mkdir(exist_ok=True)
+        shutil.copy2(temp_old_db, backup_dir / 'database.db')
+
+        # Process uploaded file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            file_path = temp_path / filename
+            file.save(file_path)
+
+            # Extract ZIP if needed
+            if filename.endswith('.zip'):
+                with zipfile.ZipFile(file_path, 'r') as zipf:
+                    zipf.extractall(temp_path)
+
+                extracted_db = temp_path / 'database.db'
+                if not extracted_db.exists():
+                    return jsonify({"error": "No database file found in the zip archive"}), 400
+            else:
+                extracted_db = file_path  # Direct .db file upload
+
+            # Verify database integrity
+            try:
+                conn = sqlite3.connect(extracted_db)
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA integrity_check")
+                result = cursor.fetchone()
+                conn.close()
+
+                if result[0] != "ok":
+                    return jsonify({"error": "Invalid SQLite database file"}), 400
+            except sqlite3.Error as e:
+                return jsonify({"error": f"Not a valid SQLite database: {str(e)}"}), 400
+
+            # **Ensure exclusive access before replacing**
+            try:
+                exclusive_conn = sqlite3.connect(db_path, isolation_level='EXCLUSIVE')
+                exclusive_conn.execute('BEGIN EXCLUSIVE')
+
+                # Replace database
+                shutil.copy2(extracted_db, db_path)
+
+                # Replace WAL and SHM if included in the ZIP
+                extracted_wal = temp_path / 'database.db-wal'
+                extracted_shm = temp_path / 'database.db-shm'
+
+                if extracted_wal.exists():
+                    shutil.copy2(extracted_wal, wal_path)
+                if extracted_shm.exists():
+                    shutil.copy2(extracted_shm, shm_path)
+
+                exclusive_conn.commit()
+                exclusive_conn.close()
+
+            except sqlite3.Error as e:
+                return jsonify({"error": f"Could not restore database: {str(e)}"}), 500
+
+            return jsonify({
+                "message": "Database restored successfully",
+                "backup_location": str(backup_dir)
+            }), 200
+
+    except Exception as e:
+        print(f"Error restoring database: {str(e)}")
+        return jsonify({"error": f"Failed to restore database: {str(e)}"}), 500
 
 
 @app.route('/api/qr_codes/<filename>', methods=['GET'])
