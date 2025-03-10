@@ -1,5 +1,7 @@
 import pandas as pd  # Add pandas import at the top
 import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
 import qrcode
 from datetime import date, datetime, timedelta, timezone
@@ -11,9 +13,33 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 QR_CODE_DIR = "qr_codes"
 
+POSTGRES_URL = os.getenv("DATABASE_URL")
+SQLITE_DB_PATH = "database.db"
+
+def get_postgres_connection():
+    """Establish a PostgreSQL connection."""
+    return psycopg2.connect(POSTGRES_URL, cursor_factory=RealDictCursor)
+
+def get_sqlite_connection():
+    """Establish an SQLite connection (for sessions only)."""
+    return sqlite3.connect(SQLITE_DB_PATH)
+
+def check_neon_db_health():
+    """Check if NeonDB is reachable by running a simple query."""
+    try:
+        with get_postgres_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1;")
+                cursor.fetchone()
+        return True  # Database is reachable
+    except Exception as e:
+        print(f"NeonDB health check failed: {e}")
+        return False  # Database is unreachable
+
+# ✅ SESSION MANAGEMENT (SQLite)
 def store_session_token(token, expiry):
     print(f"DEBUG: Storing token {token} with expiry {expiry}")
-    with sqlite3.connect("database.db") as conn:
+    with get_sqlite_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
         INSERT INTO sessions (token, expiry) 
@@ -21,10 +47,8 @@ def store_session_token(token, expiry):
         ''', (token, expiry))
         conn.commit()
         return f"Token {token} stored with expiry {expiry}"
-
-
 def validate_session_token(token):
-    with sqlite3.connect("database.db") as conn:
+    with get_sqlite_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
         SELECT expiry FROM sessions WHERE token = ?
@@ -38,11 +62,10 @@ def validate_session_token(token):
                 return True  # Token is valid
             else:
                 print("DEBUG: Token has expired.")
-    return False  # Token is invalid or expired
-
+    return False
 
 def remove_expired_tokens():
-    with sqlite3.connect("database.db") as conn:
+    with get_sqlite_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM sessions WHERE expiry < ?', (datetime.now(timezone.utc).isoformat(),))
         deleted_rows = cursor.rowcount  # Get the number of rows deleted
@@ -50,62 +73,66 @@ def remove_expired_tokens():
         print(f"Expired tokens cleaned up: {deleted_rows}")
         return deleted_rows
 
-
+# ✅ BOOK MANAGEMENT (PostgreSQL)
 def get_books(order_by="desc"):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    """Retrieve books with correct loan status and borrower details."""
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
 
-        # Validate the order_by parameter
-        order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
-        print(f"Order by: {order_clause}")
+            cursor.execute(f"""
+                SELECT 
+                    books.*,
+                    COALESCE(loans.borrowed_at, NULL) AS borrowed_at,
+                    COALESCE(members.parent_name, NULL) AS borrowing_child,
+                    CASE 
+                        WHEN loans.id IS NOT NULL THEN 'borrowed'
+                        ELSE 'available'
+                    END AS loan_status
+                FROM books
+                LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
+                LEFT JOIN members ON loans.member_id = members.id
+                ORDER BY books.created_at {order_clause}
+            """)
 
-        # Query books with sorting and optional borrower details
-        cursor.execute(f"""
-            SELECT 
-                books.*, 
-                loans.borrowed_at, 
-                members.parent_name AS borrowing_child,
-                CASE WHEN loans.returned_at IS NULL THEN 'borrowed' ELSE 'available' END AS loan_status
-            FROM books
-            LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
-            LEFT JOIN members ON loans.member_id = members.id
-            ORDER BY books.created_at {order_clause}
-        """)
-
-        books = cursor.fetchall()
-        print("Books fetched:", books)
-        return [dict(book) for book in books]
-
+            books = cursor.fetchall()
+            print("📚 Books fetched:", books)  # Debugging
+            return books
 
 
+def add_book(title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition,
+             loan_status, delivering_parent):
+    """Insert a new book into PostgreSQL with error handling."""
+    qr_code_path = None
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            try:
+                # Insert book with a temporary QR code
+                cursor.execute('''
+                    INSERT INTO books (qr_code, title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition, loan_status, delivering_parent)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                ''', (
+                    "temp_qr_code", title, author, description, year_of_publication, cover_type, pages, recommended_age,
+                    book_condition, loan_status, delivering_parent))
 
-def add_book(title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition, loan_status, delivering_parent):
-    # Generate a unique QR code for the book
-    with sqlite3.connect("database.db", timeout=5) as conn:  # Set timeout to 5 seconds
-        cursor = conn.cursor()
+                book_id = cursor.fetchone()['id']  # RealDictCursor returns dict
 
-        # Set to WAL mode for improved concurrency
-        cursor.execute("PRAGMA journal_mode=WAL;")
+                # Generate the actual QR code
+                qr_code = f"qr_for_book_{book_id}"
+                qr_code_path = generate_qr_code_with_logo(qr_code, title)
 
-        # Get the next available ID to use in QR code generation
-        cursor.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM books")
-        new_id = cursor.fetchone()[0]
-        qr_code = f"qr_for_book_{new_id}"
+                # Update the book record with the final QR code
+                cursor.execute("UPDATE books SET qr_code = %s WHERE id = %s", (qr_code, book_id))
+                conn.commit()
 
-        # Generate and save the QR code image
-        generate_qr_code_with_logo(qr_code, title)
+                return qr_code
 
-        # Insert the book record into the database
-        cursor.execute('''
-            INSERT INTO books (qr_code, title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition, loan_status, delivering_parent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (qr_code, title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition, loan_status, delivering_parent))
-
-        # Commit the transaction to save changes
-        conn.commit()
-
-    return qr_code
+            except Exception as e:
+                conn.rollback()
+                if qr_code_path:
+                    delete_qr_code(qr_code_path)
+                raise e
 
 
 def generate_qr_code_with_logo(qr_code, title):
@@ -220,223 +247,218 @@ def generate_qr_code_with_logo(qr_code, title):
 
 
 def update_book_status(qr_code, status):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE books SET status = ? WHERE qr_code = ?", (status, qr_code))
-    conn.commit()
-    conn.close()
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE books SET status = %s WHERE qr_code = %s", (status, qr_code))
+            conn.commit()
 
 def get_book_loans(book_id):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM loans WHERE book_id = ?", (book_id,))
-    loans = cursor.fetchall()
-    conn.close()
-    return loans
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM loans WHERE book_id = %s", (book_id,))
+            loans = cursor.fetchall()
+            return [dict(loan) for loan in loans]
 
 def borrow_book(qr_code, member_id, borrowed_date, book_state):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            # Lookup book_id from qr_code
+            cursor.execute("SELECT id FROM books WHERE qr_code = %s", (qr_code,))
+            book = cursor.fetchone()
 
-        # Lookup book_id from qr_code
-        cursor.execute("SELECT id FROM books WHERE qr_code = ?", (qr_code,))
-        book = cursor.fetchone()
+            if not book:
+                return False
 
-        if not book:
-            return False  # Book with given qr_code not found
+            book_id = book['id']  # Use dictionary key 'id' instead of index 0
 
-        book_id = book["id"]
+            # Insert a new loan record
+            cursor.execute("""
+                INSERT INTO loans (book_id, member_id, borrowed_at, book_state)
+                VALUES (%s, %s, %s, %s)
+            """, (book_id, member_id, borrowed_date, book_state))
 
-        # Insert a new loan record with book_id, member_id, borrowed_date, and book_state
-        cursor.execute("""
-            INSERT INTO loans (book_id, member_id, borrowed_at, book_state)
-            VALUES (?, ?, ?, ?)
-        """, (book_id, member_id, borrowed_date, book_state))
+            # Update the loan_status in the books table to 'borrowed'
+            cursor.execute("""
+                UPDATE books SET loan_status = 'borrowed' WHERE id = %s
+            """, (book_id,))
 
-        # Update the loan_status in the books table to 'borrowed'
-        cursor.execute("""
-            UPDATE books SET loan_status = 'borrowed' WHERE id = ?
-        """, (book_id,))
-
-        conn.commit()
+            try:
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                return False
 
     return True
 
 
 def update_book(book_id, **kwargs):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            try:
+                # Filter allowed fields and prepare update parameters
+                allowed_fields = {
+                    'title', 'author', 'description', 'year_of_publication',
+                    'cover_type', 'pages', 'recommended_age', 'book_condition',
+                    'delivering_parent'
+                }
 
-    try:
-        # Filter allowed fields and prepare update parameters
-        allowed_fields = {
-            'title', 'author', 'description', 'year_of_publication',
-            'cover_type', 'pages', 'recommended_age', 'book_condition',
-            'delivering_parent'
-        }
+                update_fields = []
+                values = []
 
-        update_fields = []
-        values = []
+                for field, value in kwargs.items():
+                    if field in allowed_fields:
+                        update_fields.append(f"{field} = %s")
+                        values.append(value)
 
-        for field, value in kwargs.items():
-            if field in allowed_fields:
-                update_fields.append(f"{field} = ?")
-                values.append(value)
+                if not update_fields:
+                    return None  # No valid fields to update
 
-        if not update_fields:
-            return None  # No valid fields to update
+                # Add book_id as the last parameter
+                values.append(book_id)
 
-        # Add book_id as the last parameter
-        values.append(book_id)
+                # Build the update query
+                query = f'''
+                    UPDATE books 
+                    SET {', '.join(update_fields)}, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id, title, author, description, year_of_publication, cover_type, 
+                            pages, recommended_age, book_condition, loan_status, delivering_parent, qr_code
+                '''
 
-        # Build the update query
-        query = f'''
-            UPDATE books 
-            SET {', '.join(update_fields)}
-            WHERE id = ?
-        '''
+                cursor.execute(query, values)
+                conn.commit()
 
-        cursor.execute(query, values)
-        conn.commit()
+                # Return the updated book
+                updated_book = cursor.fetchone()
+                if updated_book:
+                    return dict(updated_book)
+                return None
 
-        # Return the updated book
-        cursor.execute('''
-            SELECT id, title, author, description, year_of_publication, cover_type, 
-                   pages, recommended_age, book_condition, loan_status, delivering_parent, qr_code
-            FROM books 
-            WHERE id = ?
-        ''', (book_id,))
-
-        book = cursor.fetchone()
-        if book:
-            return {
-                "id": book[0],
-                "title": book[1],
-                "author": book[2],
-                "description": book[3],
-                "year_of_publication": book[4],
-                "cover_type": book[5],
-                "pages": book[6],
-                "recommended_age": book[7],
-                "book_condition": book[8],
-                "loan_status": book[9],
-                "delivering_parent": book[10],
-                "qr_code": book[11]
-            }
-        return None
-
-    except sqlite3.Error as e:
-        print(f"Database error: {str(e)}")
-        conn.rollback()
-        return None
-    finally:
-        conn.close()
+            except Exception as e:
+                print(f"Database error: {str(e)}")
+                conn.rollback()
+                return None
 
 
 def return_book(qr_code):
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-
-        # Find the book ID from the QR code
-        cursor.execute("SELECT id FROM books WHERE qr_code = ?", (qr_code,))
-        book = cursor.fetchone()
-
-        if not book:
-            return {"success": False, "message": "Book not found"}
-
-        book_id = book[0]
-
-        # Update the returned_at timestamp for the latest loan for this book
-        cursor.execute("""
-            UPDATE loans 
-            SET returned_at = CURRENT_TIMESTAMP 
-            WHERE book_id = ? AND returned_at IS NULL
-        """, (book_id,))
-
-        # Check if there are any other active loans for this book
-        cursor.execute("""
-            SELECT COUNT(*) FROM loans WHERE book_id = ? AND returned_at IS NULL
-        """, (book_id,))
-        active_loans_count = cursor.fetchone()[0]
-
-        # If there are no active loans, update the loan_status in the books table to 'available'
-        if active_loans_count == 0:
-            cursor.execute("""
-                UPDATE books SET loan_status = 'available' WHERE id = ?
-            """, (book_id,))
-
-        conn.commit()
-
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM books WHERE qr_code = %s", (qr_code,))
+            book = cursor.fetchone()
+            if not book:
+                return {"success": False, "message": "Book not found"}
+            book_id = book['id']
+            try:
+                cursor.execute("""
+                    UPDATE loans 
+                    SET returned_at = CURRENT_TIMESTAMP 
+                    WHERE book_id = %s AND returned_at IS NULL
+                """, (book_id,))
+                cursor.execute("""
+                    SELECT COUNT(*) FROM loans WHERE book_id = %s AND returned_at IS NULL
+                """, (book_id,))
+                active_loans_count = cursor.fetchone()['count']
+                if active_loans_count == 0:
+                    cursor.execute("""
+                        UPDATE books SET loan_status = 'available' WHERE id = %s
+                    """, (book_id,))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                # Fallback: Sync status to prevent inconsistency
+                cursor.execute("""
+                    UPDATE books 
+                    SET loan_status = 'available'
+                    WHERE id = %s AND id NOT IN (
+                        SELECT book_id FROM loans WHERE returned_at IS NULL
+                    )
+                """, (book_id,))
+                conn.commit()
+                return {"success": False, "message": f"Error returning book, status corrected: {str(e)}"}
     return {"success": True, "message": "Book returned successfully"}
 
 
 def get_members():
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM members ORDER BY created_at DESC")
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT m.*, COALESCE(COUNT(l.id), 0) AS borrowed_books_count
+                FROM members m
+                LEFT JOIN loans l 
+                    ON m.id = l.member_id AND l.returned_at IS NULL
+                GROUP BY m.id
+                ORDER BY borrowed_books_count DESC, m.created_at DESC
+            """)
+            return cursor.fetchall()
+
 
 def add_member(parent_name, kid_name, email):
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-        INSERT INTO members (parent_name, kid_name, email)
-        VALUES (?, ?, ?)
-        ''', (parent_name, kid_name, email))
-        conn.commit()
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+            INSERT INTO members (parent_name, kid_name, email)
+            VALUES (%s, %s, %s)
+            ''', (parent_name, kid_name, email))
+            conn.commit()
 
 def update_member(member_id, parent_name, kid_name, email):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE members 
-        SET parent_name = ?, kid_name = ?, email = ?
-        WHERE id = ?
-    ''', (parent_name, kid_name, email, member_id))
-    conn.commit()
-    conn.close()
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                UPDATE members 
+                SET parent_name = %s, kid_name = %s, email = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            ''', (parent_name, kid_name, email, member_id))
+            conn.commit()
 
 def delete_member(member_id):
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            # Check if there are any open loans for this member
+            cursor.execute(
+                "SELECT COUNT(*) FROM loans WHERE member_id = %s AND returned_at IS NULL",
+                (member_id,)
+            )
+            open_loans_count = cursor.fetchone()['count']  # RealDictCursor returns dict
 
-    # Check if there are any open loans for this member
-    cursor.execute(
-        "SELECT COUNT(*) FROM loans WHERE member_id = ? AND returned_at IS NULL",
-        (member_id,)
-    )
-    open_loans_count = cursor.fetchone()[0]
+            if open_loans_count > 0:
+                raise Exception("Cannot delete member with open loans.")
 
-    if open_loans_count > 0:
-        conn.close()
-        # Instead of deleting, we raise an exception.
-        raise Exception("Cannot delete member with open loans.")
-
-    # Proceed to delete the member if no open loans
-    cursor.execute('DELETE FROM members WHERE id = ?', (member_id,))
-    conn.commit()
-    conn.close()
+            # Proceed to delete the member if no open loans
+            cursor.execute('DELETE FROM members WHERE id = %s', (member_id,))
+            conn.commit()
 
 def get_book_by_qr_code(qr_code):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM books WHERE qr_code = ?", (qr_code,))
-        book = cursor.fetchone()
-    return dict(book) if book else None
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("SELECT * FROM books WHERE qr_code = %s", (qr_code,))
+            book = cursor.fetchone()
+            return dict(book) if book else None
 
 
 def get_books_by_status(param):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM books WHERE loan_status = ?", (param,))
-        rows = cursor.fetchall()
-        books = [dict(row) for row in rows]
-    return books
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            if param == 'borrowed':
+                cursor.execute("""
+                    SELECT 
+                        books.*, 
+                        loans.borrowed_at, 
+                        members.parent_name AS borrowing_child
+                    FROM books
+                    JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
+                    LEFT JOIN members ON loans.member_id = members.id
+                """)
+            else:  # 'available'
+                cursor.execute("""
+                    SELECT books.*
+                    FROM books
+                    WHERE books.id NOT IN (
+                        SELECT book_id FROM loans WHERE returned_at IS NULL
+                    )
+                """)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
 def get_borrowing_history(qr_code=None):
     query = '''
@@ -453,18 +475,17 @@ def get_borrowing_history(qr_code=None):
     '''
     params = []
     if qr_code:
-        query += " WHERE books.qr_code = ?"
+        query += " WHERE books.qr_code = %s"
         params.append(qr_code)
 
     query += " ORDER BY loans.borrowed_at DESC"
 
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        results = cursor.fetchall()
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            return [dict(row) for row in results]
 
-    return [dict(row) for row in results]
 
 def get_open_loans(qr_code=None):
     query = """
@@ -482,118 +503,110 @@ def get_open_loans(qr_code=None):
     """
     params = []
     if qr_code:
-        query += " AND b.qr_code = ?"
+        query += " AND b.qr_code = %s"
         params.append(qr_code)
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        return [dict(row) for row in cursor.fetchall()]
+
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
 
 
 def get_loan_history(qr_code, show_all):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
-            FROM loans l
-            JOIN books b ON l.book_id = b.id
-            JOIN members m ON l.member_id = m.id
-            WHERE b.qr_code = ?
-        """
-        if not show_all:
-            query += " AND l.returned_at IS NULL"  # Filter for open loans only
-        query += " ORDER BY l.borrowed_at DESC"
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            query = """
+                SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
+                FROM loans l
+                JOIN books b ON l.book_id = b.id
+                JOIN members m ON l.member_id = m.id
+                WHERE b.qr_code = %s
+            """
+            if not show_all:
+                query += " AND l.returned_at IS NULL"  # Filter for open loans only
+            query += " ORDER BY l.borrowed_at DESC"
 
-        cursor.execute(query, (qr_code,))
-        loans = cursor.fetchall()
-
-    return [dict(loan) for loan in loans]
+            cursor.execute(query, (qr_code,))
+            loans = cursor.fetchall()
+            return [dict(loan) for loan in loans]
 
 
 def get_all_open_loans():
     print("getting only open loans")
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
-            FROM loans l
-            JOIN books b ON l.book_id = b.id
-            JOIN members m ON l.member_id = m.id
-            WHERE l.returned_at IS NULL  -- Only open loans
-            ORDER BY l.borrowed_at DESC
-        """
-        cursor.execute(query)
-        loans = cursor.fetchall()
-
-    return [dict(loan) for loan in loans]
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            query = """
+                SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
+                FROM loans l
+                JOIN books b ON l.book_id = b.id
+                JOIN members m ON l.member_id = m.id
+                WHERE l.returned_at IS NULL  -- Only open loans
+                ORDER BY l.borrowed_at DESC
+            """
+            cursor.execute(query)
+            loans = cursor.fetchall()
+            return [dict(loan) for loan in loans]
 
 def get_all_loans():
     print("getting all loans")
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        query = """
-            SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
-            FROM loans l
-            JOIN books b ON l.book_id = b.id
-            JOIN members m ON l.member_id = m.id
-            ORDER BY l.borrowed_at DESC
-        """
-        cursor.execute(query)
-        loans = cursor.fetchall()
-
-    return [dict(loan) for loan in loans]
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            query = """
+                SELECT l.id, l.book_id, l.borrowed_at, l.returned_at, l.book_state, b.title AS book_title, m.parent_name AS borrower_name, m.kid_name AS borrower_child
+                FROM loans l
+                JOIN books b ON l.book_id = b.id
+                JOIN members m ON l.member_id = m.id
+                ORDER BY l.borrowed_at DESC
+            """
+            cursor.execute(query)
+            loans = cursor.fetchall()
+            return [dict(loan) for loan in loans]
 
 
 # Function to extract book data for reporting
 def get_books_report(order_by="desc", sort_column="title", include_history=True):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Validate the order_by parameter
+            order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
+            valid_sort_columns = ["created_at", "borrowed_at", "title"]
+            sort_column = sort_column if sort_column in valid_sort_columns else "title"
 
-        # Validate the order_by parameter
-        order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
-        valid_sort_columns = ["created_at", "borrowed_at", "title"]
-        sort_column = sort_column if sort_column in valid_sort_columns else "title"
+            # Fetch loan data based on include_history parameter
+            if include_history:
+                # Fetch all loans (both open and closed)
+                query = f"""
+                    SELECT 
+                        books.title,
+                        books.author,
+                        loans.borrowed_at,
+                        loans.returned_at,
+                        members.parent_name AS borrowed_by,
+                        members.email AS borrower_email
+                    FROM books
+                    LEFT JOIN loans ON books.id = loans.book_id
+                    LEFT JOIN members ON loans.member_id = members.id
+                    ORDER BY books.{sort_column} {order_clause}
+                """
+            else:
+                # Fetch only open loans
+                query = f"""
+                    SELECT 
+                        books.title,
+                        books.author,
+                        loans.borrowed_at,
+                        members.parent_name AS borrowed_by,
+                        members.email AS borrower_email
+                    FROM books
+                    LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
+                    LEFT JOIN members ON loans.member_id = members.id
+                    WHERE loans.returned_at IS NULL
+                    ORDER BY books.{sort_column} {order_clause}
+                """
 
-        # Fetch loan data based on include_history parameter
-        if include_history:
-            # Fetch all loans (both open and closed)
-            query = f"""
-                SELECT 
-                    books.title,
-                    books.author,
-                    loans.borrowed_at,
-                    loans.returned_at,
-                    members.parent_name AS borrowed_by,
-                    members.email AS borrower_email
-                FROM books
-                LEFT JOIN loans ON books.id = loans.book_id
-                LEFT JOIN members ON loans.member_id = members.id
-                ORDER BY books.{sort_column} {order_clause}
-            """
-        else:
-            # Fetch only open loans
-            query = f"""
-                SELECT 
-                    books.title,
-                    books.author,
-                    loans.borrowed_at,
-                    members.parent_name AS borrowed_by,
-                    members.email AS borrower_email
-                FROM books
-                LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
-                LEFT JOIN members ON loans.member_id = members.id
-                WHERE loans.returned_at IS NULL
-                ORDER BY books.{sort_column} {order_clause}
-            """
-
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
 # Function to generate an Excel report
 def generate_books_report(order_by="desc", sort_column="title", include_history=True, language="he"):
@@ -685,53 +698,51 @@ def generate_books_report(order_by="desc", sort_column="title", include_history=
 
 # Function to generate an inventory report
 def generate_inventory_report(order_by="desc", sort_column="title", include_borrowed=True, language="he"):
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            print("include_borrowed:", include_borrowed)
 
-        print("include_borrowed:", include_borrowed)
+            # Validate the order_by parameter
+            order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
+            valid_sort_columns = ["created_at", "title"]
+            sort_column = sort_column if sort_column in valid_sort_columns else "title"
 
-        # Validate the order_by parameter
-        order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
-        valid_sort_columns = ["created_at", "title"]
-        sort_column = sort_column if sort_column in valid_sort_columns else "title"
+            # Fetch inventory data based on include_borrowed parameter
+            if include_borrowed:
+                query = f"""
+                    SELECT 
+                        books.id,
+                        books.title,
+                        books.author,
+                        books.description,
+                        books.year_of_publication,
+                        books.pages,
+                        books.cover_type,
+                        books.book_condition,
+                        books.loan_status
+                    FROM books
+                    ORDER BY books.{sort_column} {order_clause}
+                """
+            else:
+                query = f"""
+                    SELECT 
+                        books.id,
+                        books.title,
+                        books.author,
+                        books.description,
+                        books.year_of_publication,
+                        books.pages,
+                        books.cover_type,
+                        books.book_condition,
+                        books.loan_status
+                    FROM books
+                    WHERE books.loan_status = 'available'
+                    ORDER BY books.{sort_column} {order_clause}
+                """
 
-        # Fetch inventory data based on include_borrowed parameter
-        if include_borrowed:
-            query = f"""
-                SELECT 
-                    books.id,
-                    books.title,
-                    books.author,
-                    books.description,
-                    books.year_of_publication,
-                    books.pages,
-                    books.cover_type,
-                    books.book_condition,
-                    books.loan_status
-                FROM books
-                ORDER BY books.{sort_column} {order_clause}
-            """
-        else:
-            query = f"""
-                SELECT 
-                    books.id,
-                    books.title,
-                    books.author,
-                    books.description,
-                    books.year_of_publication,
-                    books.pages,
-                    books.cover_type,
-                    books.book_condition,
-                    books.loan_status
-                FROM books
-                WHERE books.loan_status = 'available'
-                ORDER BY books.{sort_column} {order_clause}
-            """
-
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        books_data = [dict(row) for row in rows]
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            books_data = [dict(row) for row in rows]
 
     # Create a DataFrame from the extracted data
     df = pd.DataFrame(books_data)
@@ -823,20 +834,19 @@ def generate_inventory_report(order_by="desc", sort_column="title", include_borr
 def find_email_by_borrower_name(borrower_name):
     """
     Look up the email of a member by the borrower name.
-    The borrower name corresponds to the `kid_name` in the members table.
+    The borrower name corresponds to the `parent_name` in the members table.
     """
     try:
-        with sqlite3.connect("database.db") as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT email FROM members WHERE parent_name = ?", (borrower_name,))
-            result = cursor.fetchone()
-            if result:
-                email = result["email"]  # Extract the email from the result
-                return email
-            else:
-                print(f"No email found for borrower name: {borrower_name}")
-                return None
+        with get_postgres_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+                cursor.execute("SELECT email FROM members WHERE parent_name = %s", (borrower_name,))
+                result = cursor.fetchone()
+                if result:
+                    email = result["email"]  # Extract the email from the result
+                    return email
+                else:
+                    print(f"No email found for borrower name: {borrower_name}")
+                    return None
     except Exception as e:
         print(f"Error finding email for borrower name '{borrower_name}': {e}")
         return None
@@ -846,56 +856,56 @@ def check_recent_reminder(loan_id, days=14):
     """
     Check if a reminder has been sent for this loan in the past 'days' days.
     """
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-        cursor.execute('''
-        SELECT 1 FROM reminders 
-        WHERE loan_id = ? AND sent_at >= ?
-        ''', (loan_id, cutoff_date))
-        result = cursor.fetchone()
-        return result is not None
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            cursor.execute('''
+            SELECT 1 FROM reminders 
+            WHERE loan_id = %s AND sent_at >= %s
+            ''', (loan_id, cutoff_date))
+            result = cursor.fetchone()
+            return result is not None
 
 
 def record_reminder(loan_id):
     """
     Record that a reminder has been sent for a specific loan.
     """
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-        sent_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        try:
-            cursor.execute('''
-            INSERT INTO reminders (loan_id, sent_at) 
-            VALUES (?, ?)
-            ''', (loan_id, sent_at))
-            conn.commit()
-        except Exception as e:
-            print(f"Failed to insert reminder record for loan_id {loan_id}: {e}")
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            sent_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            try:
+                cursor.execute('''
+                INSERT INTO reminders (loan_id, sent_at) 
+                VALUES (%s, %s)
+                ''', (loan_id, sent_at))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Failed to insert reminder record for loan_id {loan_id}: {e}")
 
 
 def fetch_last_reminder_date(loan_id):
     """
     Get the most recent reminder date for a specific loan_id.
     """
-    with sqlite3.connect("database.db") as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT sent_at 
-        FROM reminders 
-        WHERE loan_id = ? 
-        ORDER BY sent_at DESC 
-        LIMIT 1
-        ''', (loan_id,))
-        result = cursor.fetchone()
-        return result["sent_at"] if result else None
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute('''
+            SELECT sent_at 
+            FROM reminders 
+            WHERE loan_id = %s 
+            ORDER BY sent_at DESC 
+            LIMIT 1
+            ''', (loan_id,))
+            result = cursor.fetchone()
+            return result["sent_at"] if result else None
 
 
 def delete_qr_code(qr_code_path):
     """
     Deletes a QR code file if the book insert fails.
+    No database changes needed for this function.
     """
     try:
         if qr_code_path and os.path.exists(qr_code_path):
@@ -905,28 +915,30 @@ def delete_qr_code(qr_code_path):
         print(f"Failed to delete orphaned QR code {qr_code_path}: {str(e)}")
 
 
-import sqlite3
-
 def get_member_loans(member_id):
     """Retrieve books currently borrowed by a member."""
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT books.title, loans.borrowed_at
-            FROM loans
-            JOIN books ON loans.book_id = books.id
-            WHERE loans.member_id = ? AND loans.returned_at IS NULL
-        ''', (member_id,))
-        loans = cursor.fetchall()
-        return [{"book_title": loan[0], "borrowed_at": loan[1]} for loan in loans]
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute('''
+                SELECT books.title, loans.borrowed_at
+                FROM loans
+                JOIN books ON loans.book_id = books.id
+                WHERE loans.member_id = %s AND loans.returned_at IS NULL
+            ''', (member_id,))
+            loans = cursor.fetchall()
+            return [{"book_title": loan[0], "borrowed_at": loan[1]} for loan in loans]
+
 
 def get_member_borrowed_books_count(member_id):
     """Get the count of books currently borrowed by a member."""
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT COUNT(*) FROM loans
-            WHERE member_id = ? AND returned_at IS NULL
-        ''', (member_id,))
-        count = cursor.fetchone()[0]
-        return count
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute('''
+                SELECT COUNT(*) AS count FROM loans
+                WHERE member_id = %s AND returned_at IS NULL
+            ''', (member_id,))
+            result = cursor.fetchone()
+
+            # Ensure we return a valid integer (default to 0 if no row exists)
+            return result["count"] if result and "count" in result else 0
+
