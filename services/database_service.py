@@ -103,6 +103,24 @@ def get_books(order_by="desc"):
             print("📚 Books fetched:", books)  # Debugging
             return books
 
+def convert_to_int_or_none(val):
+    """
+    Convert an incoming value to int if possible.
+    If it's None, empty string, or invalid, return None instead.
+    """
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    val_str = str(val).strip()
+    if not val_str:
+        # empty string => None
+        return None
+    try:
+        return int(val_str)
+    except ValueError:
+        # can't parse => None or raise an error
+        return None
 
 def add_book(title, author, description, year_of_publication, cover_type, pages,
              recommended_age, book_condition, loan_status, delivering_parent):
@@ -112,6 +130,10 @@ def add_book(title, author, description, year_of_publication, cover_type, pages,
     qr_code_path = None
     with get_postgres_connection() as conn:
         with conn.cursor() as cursor:
+            year_of_publication = convert_to_int_or_none(year_of_publication)
+            pages = convert_to_int_or_none(pages)
+            recommended_age = convert_to_int_or_none(recommended_age)
+
             try:
                 # Insert the book with a temporary QR code.
                 cursor.execute('''
