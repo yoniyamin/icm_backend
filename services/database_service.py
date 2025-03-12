@@ -191,7 +191,9 @@ def generate_qr_code_with_logo(qr_code, title):
     Generate a QR code image with a logo and title. Returns the PNG image bytes.
     """
     # Convert the title for proper RTL display if needed.
+    print("DEBUG: The 'title' I'm about to use:", repr(title))
     rtl_title = get_display(title)
+    print("DEBUG: after get_display =>", repr(rtl_title))
 
     # Create the QR code.
     qr = qrcode.QRCode(
@@ -231,9 +233,10 @@ def generate_qr_code_with_logo(qr_code, title):
     canvas = Image.new("RGB", (qr_img.size[0], qr_img.size[1] + title_space), "white")
     canvas.paste(qr_img, (0, 0))
     draw = ImageDraw.Draw(canvas)
+    font_path = os.path.join(os.path.dirname(__file__), "static", "arial.ttf")
     try:
         try:
-            font = ImageFont.truetype("arial.ttf", 24)
+            font = ImageFont.truetype(font_path, 24)
         except IOError:
             font = ImageFont.load_default()
         text_bbox = draw.textbbox((0, 0), rtl_title, font=font)
