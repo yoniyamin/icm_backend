@@ -440,11 +440,15 @@ def update_book(book_id, **kwargs):
                     'delivering_parent'
                 }
 
+
                 update_fields = []
                 values = []
 
                 for field, value in kwargs.items():
                     if field in allowed_fields:
+                        if field in ("year_of_publication", "pages", "recommended_age"):
+                            value = convert_to_int_or_none(value)
+
                         update_fields.append(f"{field} = %s")
                         values.append(value)
 
