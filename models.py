@@ -59,6 +59,13 @@ def init_postgres():
             )
         ''')
 
+        cursor.execute('''
+                   CREATE TABLE IF NOT EXISTS qr_codes (
+                       qr_code TEXT PRIMARY KEY,
+                       image BYTEA NOT NULL
+                   )
+       ''')
+
         conn.commit()
 
 def sync_sequences():
@@ -67,22 +74,22 @@ def sync_sequences():
         # Sync loans_id_seq
             cursor.execute("SELECT MAX(id) FROM loans")
             max_loan_id = cursor.fetchone()[0] or 0  # Default to 0 if table is empty
-            cursor.execute("SELECT setval('loans_id_seq', %s)", (max_loan_id + 1,))
+            cursor.execute("SELECT setval('loans_id_seq', %s, false)", (max_loan_id + 1,))
 
             # Sync books_id_seq (if needed)
             cursor.execute("SELECT MAX(id) FROM books")
             max_book_id = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT setval('books_id_seq', %s)", (max_book_id + 1,))
+            cursor.execute("SELECT setval('books_id_seq', %s, false)", (max_book_id + 1,))
 
             # Sync members_id_seq (if needed)
             cursor.execute("SELECT MAX(id) FROM members")
             max_member_id = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT setval('members_id_seq', %s)", (max_member_id + 1,))
+            cursor.execute("SELECT setval('members_id_seq', %s, false)", (max_member_id + 1,))
 
             # Sync reminders_id_seq (if needed)
             cursor.execute("SELECT MAX(id) FROM reminders")
             max_reminder_id = cursor.fetchone()[0] or 0
-            cursor.execute("SELECT setval('reminders_id_seq', %s)", (max_reminder_id + 1,))
+            cursor.execute("SELECT setval('reminders_id_seq', %s, false)", (max_reminder_id + 1,))
 
             conn.commit()
             print("Sequences synchronized successfully.")

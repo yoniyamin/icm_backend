@@ -1,8 +1,11 @@
+import io
+
 import pandas as pd  # Add pandas import at the top
 import sqlite3
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+from io import BytesIO
 import qrcode
 from datetime import date, datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
@@ -10,6 +13,7 @@ from bidi.algorithm import get_display  # Correctly display RTL text
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from reportlab.lib.utils import ImageReader
 
 QR_CODE_DIR = "qr_codes"
 
@@ -100,150 +104,262 @@ def get_books(order_by="desc"):
             return books
 
 
-def add_book(title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition,
-             loan_status, delivering_parent):
-    """Insert a new book into PostgreSQL with error handling."""
+def add_book(title, author, description, year_of_publication, cover_type, pages,
+             recommended_age, book_condition, loan_status, delivering_parent):
+    """
+    Insert a new book into PostgreSQL and store its generated QR code in the qr_codes table.
+    """
     qr_code_path = None
     with get_postgres_connection() as conn:
         with conn.cursor() as cursor:
             try:
-                # Insert book with a temporary QR code
+                # Insert the book with a temporary QR code.
                 cursor.execute('''
-                    INSERT INTO books (qr_code, title, author, description, year_of_publication, cover_type, pages, recommended_age, book_condition, loan_status, delivering_parent)
+                    INSERT INTO books (qr_code, title, author, description, year_of_publication, cover_type, pages,
+                    recommended_age, book_condition, loan_status, delivering_parent)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 ''', (
-                    "temp_qr_code", title, author, description, year_of_publication, cover_type, pages, recommended_age,
-                    book_condition, loan_status, delivering_parent))
-
-                book_id = cursor.fetchone()['id']  # RealDictCursor returns dict
-
-                # Generate the actual QR code
+                    "temp_qr_code", title, author, description, year_of_publication, cover_type, pages,
+                    recommended_age, book_condition, loan_status, delivering_parent))
+                book_id = cursor.fetchone()['id']
+                # Generate the actual QR code string and image.
                 qr_code = f"qr_for_book_{book_id}"
-                qr_code_path = generate_qr_code_with_logo(qr_code, title)
-
-                # Update the book record with the final QR code
+                image_data = generate_qr_code_with_logo(qr_code, title)
+                # Insert the QR code image into the qr_codes table.
+                cursor.execute('''
+                    INSERT INTO qr_codes (qr_code, image)
+                    VALUES (%s, %s)
+                ''', (qr_code, psycopg2.Binary(image_data)))
+                # Update the book record with the final QR code.
                 cursor.execute("UPDATE books SET qr_code = %s WHERE id = %s", (qr_code, book_id))
                 conn.commit()
-
                 return qr_code
-
             except Exception as e:
                 conn.rollback()
-                if qr_code_path:
-                    delete_qr_code(qr_code_path)
                 raise e
+
+def store_qr_code_in_db(qr_code, image_bytes):
+    """Store the generated QR code image bytes in the database."""
+    with get_postgres_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO qr_codes (qr_code, image)
+                VALUES (%s, %s)
+                ON CONFLICT (qr_code) DO UPDATE SET image = EXCLUDED.image
+            """, (qr_code, psycopg2.Binary(image_bytes)))
+            conn.commit()
+
+def download_qr_code(qr_code):
+    """
+    Retrieve the QR code image binary data from the database given a qr_code identifier.
+    """
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("SELECT image FROM qr_codes WHERE qr_code = %s", (qr_code,))
+            result = cursor.fetchone()
+            if result and result.get("image"):
+                return result["image"]
+            else:
+                return None
 
 
 def generate_qr_code_with_logo(qr_code, title):
-    from bidi.algorithm import get_display
-    import qrcode
-    from PIL import Image, ImageDraw, ImageFont
-    import os
-
-    # Convert the Hebrew text to display correctly in RTL
+    """
+    Generate a QR code image with a logo and title. Returns the PNG image bytes.
+    """
+    # Convert the title for proper RTL display if needed.
     rtl_title = get_display(title)
 
-    # Create a QR code with adjusted settings for longer text
+    # Create the QR code.
     qr = qrcode.QRCode(
-        version=None,  # Allow automatic version selection based on content
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,  # Changed to Q level for better balance
-        box_size=12,  # Increased box size for better readability
-        border=5,  # Slightly larger border
+        version=None,  # Automatically choose version
+        error_correction=qrcode.constants.ERROR_CORRECT_Q,
+        box_size=12,
+        border=5,
     )
-
-    # Add data and optimize size
     qr.add_data(qr_code)
     qr.make(fit=True)
+    print(f"QR Code Version: {qr.version}")
 
-    # Get the QR code version that was selected
-    current_version = qr.version
-    print(f"QR Code Version: {current_version}")  # Debug info
-
-    # Create QR code image with increased size
+    # Create the QR image.
     qr_img = qr.make_image(fill="black", back_color="white").convert("RGB")
-
-    # Get the base size of the QR code
     qr_base_size = qr_img.size[0]
 
-    # Load and resize the logo
-    logo_path = "./static/icm_logo.png"
+    # Try to load and overlay the logo.
+    here = os.path.abspath(os.path.dirname(__file__))
+    logo_path = os.path.join(here, "..", "static", "icm_logo.png")
     try:
         logo = Image.open(logo_path)
-        # Reduce logo size to 20% of QR code (smaller than original 25%)
         logo_size = int(qr_base_size * 0.20)
         logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-
-        # Create a white background for the logo to improve contrast
         logo_bg = Image.new('RGBA', (logo_size + 8, logo_size + 8), 'white')
         logo_pos = ((logo_bg.size[0] - logo_size) // 2, (logo_bg.size[1] - logo_size) // 2)
         logo_bg.paste(logo, logo_pos, mask=logo if logo.mode == 'RGBA' else None)
-
-        # Calculate position for the logo
         pos = ((qr_base_size - logo_bg.size[0]) // 2, (qr_base_size - logo_bg.size[1]) // 2)
-
-        # Create a mask for the logo area
         mask = Image.new('L', qr_img.size, 255)
         mask_draw = ImageDraw.Draw(mask)
-        mask_draw.rectangle(
-            [pos[0], pos[1], pos[0] + logo_bg.size[0], pos[1] + logo_bg.size[1]],
-            fill=0
-        )
-
-        # Paste the logo with the white background
+        mask_draw.rectangle([pos[0], pos[1], pos[0] + logo_bg.size[0], pos[1] + logo_bg.size[1]], fill=0)
         qr_img.paste(logo_bg, pos, mask=logo_bg if logo_bg.mode == 'RGBA' else None)
-
     except Exception as e:
         print(f"Error adding logo to QR code: {e}")
-        # Continue without logo if there's an error
 
-    # Add space for title
-    title_space = 50  # Increased space for title
+    # Add space at the bottom for the title.
+    title_space = 50
     canvas = Image.new("RGB", (qr_img.size[0], qr_img.size[1] + title_space), "white")
     canvas.paste(qr_img, (0, 0))
-
-    # Add title
     draw = ImageDraw.Draw(canvas)
     try:
-        # Try to load Arial font, fallback to default if not available
         try:
-            font = ImageFont.truetype("arial.ttf", 24)  # Increased font size
+            font = ImageFont.truetype("arial.ttf", 24)
         except IOError:
             font = ImageFont.load_default()
-
-        # Center the title text
         text_bbox = draw.textbbox((0, 0), rtl_title, font=font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
-        text_position = (
-            (canvas.size[0] - text_width) // 2,
-            qr_img.size[1] + (title_space - text_height) // 2
-        )
-
-        # Draw text with a small white outline for better readability
-        draw.text((text_position[0]-1, text_position[1]), rtl_title, fill="white", font=font)
-        draw.text((text_position[0]+1, text_position[1]), rtl_title, fill="white", font=font)
-        draw.text((text_position[0], text_position[1]-1), rtl_title, fill="white", font=font)
-        draw.text((text_position[0], text_position[1]+1), rtl_title, fill="white", font=font)
+        text_position = ((canvas.size[0] - text_width) // 2, qr_img.size[1] + (title_space - text_height) // 2)
+        # Draw a simple outline for better readability.
+        draw.text((text_position[0] - 1, text_position[1]), rtl_title, fill="white", font=font)
+        draw.text((text_position[0] + 1, text_position[1]), rtl_title, fill="white", font=font)
+        draw.text((text_position[0], text_position[1] - 1), rtl_title, fill="white", font=font)
+        draw.text((text_position[0], text_position[1] + 1), rtl_title, fill="white", font=font)
         draw.text(text_position, rtl_title, fill="black", font=font)
-
     except Exception as e:
         print(f"Error adding title: {e}")
 
-    # Save with high quality
-    qr_code_dir = "qr_codes"
-    if not os.path.exists(qr_code_dir):
-        os.makedirs(qr_code_dir)
+    # Save the image to a BytesIO buffer.
+    img_buffer = io.BytesIO()
+    canvas.save(img_buffer, format="PNG", quality=95)
+    img_buffer.seek(0)
+    image_data = img_buffer.read()
+    print(f"Generated QR code for {qr_code}, image size in bytes: {len(image_data)}")
+    return image_data
 
-    output_path = os.path.join(qr_code_dir, f"{qr_code}.png")
-    canvas.save(output_path, "PNG", quality=95)
+def get_all_qr_codes_with_title():
+    """
+    Return a list of dicts: [
+      { 'qr_code': ..., 'title': ..., 'image': ... },
+      ...
+    ]
+    including the book's title if it exists.
+    """
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # We LEFT JOIN books on matching qr_code
+            # so that if a qr_code in 'qr_codes' doesn't have an entry in 'books', it still shows up.
+            cursor.execute("""
+                SELECT qr_codes.qr_code,
+                       books.title
+                FROM qr_codes
+                LEFT JOIN books ON qr_codes.qr_code = books.qr_code
+                ORDER BY qr_codes.qr_code
+            """)
+            return cursor.fetchall()
 
-    # Print debug info
-    print(f"Generated QR code: {output_path}")
-    print(f"QR code size: {qr_img.size}")
-    print(f"Final image size: {canvas.size}")
 
-    return output_path
+def generate_qr_pdf_report_by_list(qr_code_list):
+    """
+    Generate a PDF containing QR codes arranged in a 5-column grid with cutting guides.
+    No QR code identifiers displayed.
+    """
+    import io
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import inch
+    from PIL import Image
+    from reportlab.lib.utils import ImageReader
+
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            query = """
+                SELECT qr_codes.qr_code, qr_codes.image
+                FROM qr_codes
+                WHERE qr_codes.qr_code = ANY(%s)
+                ORDER BY qr_codes.qr_code
+            """
+            cursor.execute(query, (qr_code_list,))
+            qr_codes = cursor.fetchall()
+
+    if not qr_codes:
+        raise Exception("No matching QR codes found.")
+
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    # Define grid parameters - 5 columns
+    cols = 5
+    rows = 4  # Typically 4 rows per page for letter size
+    margin = 0.5 * inch  # Margin around the page
+
+    # Calculate QR code size based on available space
+    qr_width = (width - 2 * margin) / cols
+    qr_height = (height - 2 * margin) / rows
+
+    # Make QR codes square using the smaller dimension
+    qr_size = min(qr_width, qr_height)
+
+    # Center the grid on the page
+    x_start = margin + (width - 2 * margin - (cols * qr_size)) / 2
+    y_start = height - margin
+
+    qr_index = 0
+    total_qrs = len(qr_codes)
+
+    while qr_index < total_qrs:
+        # Draw cutting guides - horizontal lines
+        c.setStrokeColorRGB(0.8, 0.8, 0.8)  # Light gray
+        c.setDash([2, 2])  # Dashed line
+
+        # Horizontal cutting guides
+        for row in range(rows + 1):
+            y_line = height - margin - (row * qr_size)
+            c.line(margin, y_line, width - margin, y_line)
+
+        # Vertical cutting guides
+        for col in range(cols + 1):
+            x_line = x_start + (col * qr_size)
+            c.line(x_line, margin, x_line, height - margin)
+
+        # Draw QR codes
+        for row in range(rows):
+            for col in range(cols):
+                if qr_index >= total_qrs:
+                    break
+
+                qr = qr_codes[qr_index]
+
+                # Calculate position for this QR code
+                x = x_start + (col * qr_size)
+                y = y_start - (row * qr_size)
+
+                # Convert binary image data to PIL Image
+                img_buffer = io.BytesIO(qr["image"])
+
+                # Add a small padding (10% of QR size) within each cell
+                padding = qr_size * 0.1
+                c.drawImage(
+                    ImageReader(img_buffer),
+                    x + padding,
+                    y - qr_size + padding,
+                    width=qr_size - (2 * padding),
+                    height=qr_size - (2 * padding)
+                )
+
+                qr_index += 1
+
+            if qr_index >= total_qrs:
+                break
+
+        # Start a new page if there are more QR codes
+        if qr_index < total_qrs:
+            c.showPage()
+            y_start = height - margin
+
+    c.save()
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 
 def update_book_status(qr_code, status):

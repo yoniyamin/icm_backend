@@ -131,16 +131,28 @@ def send_email(to_email, subject, loan_details, language='en'):
         return False
 
 
-@app.route('/api/qr_codes/<filename>', methods=['GET'])
-def get_qr_code(filename):
+@app.route('/api/qr_codes/<qr_code_value>', methods=['GET'])
+@token_required
+def download_qr_image(qr_code_value):
     """
-    Serve the QR code image file.
+    Download the QR code image from the db. The <qr_code_value> here
+    is the 'qr_code' column in your `qr_codes` table.
     """
-    qr_code_path = os.path.join(app.root_path, 'qr_codes', filename)
-    if os.path.exists(qr_code_path):
-        return send_file(qr_code_path, as_attachment=True)
-    else:
-        return jsonify({"error": "File not found"}), 404
+    try:
+        # 1) Get the raw bytes from the db
+        image_data = db.download_qr_code(qr_code_value)
+        if not image_data:
+            return jsonify({"error": "No image found in DB"}), 404
+
+        # 2) Return it as an attachment
+        return send_file(
+            BytesIO(image_data),
+            mimetype='image/png',
+            as_attachment=True,
+            download_name=f"{qr_code_value}.png"  # The filename shown to the user
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # Route to get all books
 @app.route("/api/books", methods=["GET"])
@@ -550,26 +562,43 @@ def get_qr_codes():
 @app.route('/api/reports/qr_codes', methods=['POST'])
 @token_required
 def qr_codes_pdf_report():
-    """
-    Expects JSON in the request body with:
-      - start_qr: starting QR code number (integer).
-      - end_qr: ending QR code number (integer).
-    Returns a downloadable PDF file containing QR codes from the fixed qr_codes/ directory.
-    """
     data = request.get_json()
     try:
-        start_qr = int(data['start_qr'])
-        end_qr = int(data['end_qr'])
+        # e.g. data["selected_qr_codes"] is a list of strings
+        selected_qr_codes = data.get('selected_qr_codes', [])
+        if not selected_qr_codes:
+            return jsonify({"error": "No QR codes provided."}), 400
 
-        pdf_bytes = generate_qr_pdf(start_qr, end_qr)
-        return send_file(
-            BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name="qr_codes_printable.pdf"
-        )
+        pdf_bytes = db.generate_qr_pdf_report_by_list(selected_qr_codes)
+        return send_file(BytesIO(pdf_bytes),
+                         mimetype="application/pdf",
+                         as_attachment=True,
+                         download_name="qr_codes_printable.pdf")
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+@app.route('/api/qr_codes_with_titles', methods=['GET'])
+@token_required
+def get_qr_codes_with_titles():
+    try:
+        qr_codes_data = db.get_all_qr_codes_with_title()  # The function we showed above
+        # Return as JSON
+        return jsonify(qr_codes_data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/api/qr_code/<string:qr_code>', methods=['GET'])
+@token_required
+def download_qr_code_route(qr_code):
+    try:
+        image_data = db.download_qr_code(qr_code)
+        if image_data:
+            return send_file(BytesIO(image_data), mimetype='image/png',
+                             as_attachment=True, download_name=f"{qr_code}.png")
+        else:
+            return jsonify({"error": "QR code not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
