@@ -233,11 +233,19 @@ def generate_qr_code_with_logo(qr_code, title):
     canvas = Image.new("RGB", (qr_img.size[0], qr_img.size[1] + title_space), "white")
     canvas.paste(qr_img, (0, 0))
     draw = ImageDraw.Draw(canvas)
-    font_path = os.path.join(os.path.dirname(__file__), "static", "arial.ttf")
+    font_path = os.path.join(os.path.dirname(__file__), "static", "FreeSans.ttf")
     try:
         try:
             font = ImageFont.truetype(font_path, 24)
+            print("Font file found:", font_path)
+            for char in title:
+                if font.getmask(char).getbbox() is None:
+                    print(f"Warning: Character '{char}' not supported by font")
         except IOError:
+            print("Font file not found:", font_path)
+            font = ImageFont.load_default()
+        except Exception as e:
+            print(f"Font error: {e}")
             font = ImageFont.load_default()
         text_bbox = draw.textbbox((0, 0), rtl_title, font=font)
         text_width = text_bbox[2] - text_bbox[0]
@@ -248,7 +256,7 @@ def generate_qr_code_with_logo(qr_code, title):
         draw.text((text_position[0] + 1, text_position[1]), rtl_title, fill="white", font=font)
         draw.text((text_position[0], text_position[1] - 1), rtl_title, fill="white", font=font)
         draw.text((text_position[0], text_position[1] + 1), rtl_title, fill="white", font=font)
-        draw.text(text_position, rtl_title, fill="black", font=font)
+        draw.text(text_position, title, fill="black", font=font, direction='rtl')
     except Exception as e:
         print(f"Error adding title: {e}")
 
