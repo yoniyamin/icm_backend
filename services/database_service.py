@@ -233,7 +233,7 @@ def generate_qr_code_with_logo(qr_code, title):
     canvas = Image.new("RGB", (qr_img.size[0], qr_img.size[1] + title_space), "white")
     canvas.paste(qr_img, (0, 0))
     draw = ImageDraw.Draw(canvas)
-    font_path = os.path.join(os.path.dirname(__file__), "static", "FreeSans.ttf")
+    font_path = os.path.join(here,"..", "static", "FreeSans.ttf")
     try:
         try:
             font = ImageFont.truetype(font_path, 24)
