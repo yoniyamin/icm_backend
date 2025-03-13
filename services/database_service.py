@@ -191,9 +191,7 @@ def generate_qr_code_with_logo(qr_code, title):
     Generate a QR code image with a logo and title. Returns the PNG image bytes.
     """
     # Convert the title for proper RTL display if needed.
-    print("DEBUG: The 'title' I'm about to use:", repr(title))
     rtl_title = get_display(title)
-    print("DEBUG: after get_display =>", repr(rtl_title))
 
     # Create the QR code.
     qr = qrcode.QRCode(
@@ -292,8 +290,8 @@ def get_all_qr_codes_with_title():
 
 def generate_qr_pdf_report_by_list(qr_code_list):
     """
-    Generate a PDF containing QR codes arranged in a 5-column grid with cutting guides.
-    No QR code identifiers displayed.
+    Generate a PDF containing QR codes arranged in a 3-column, 4-row grid
+    with cutting guides, each QR code bigger than before.
     """
     import io
     from reportlab.lib.pagesizes import letter
@@ -320,41 +318,46 @@ def generate_qr_pdf_report_by_list(qr_code_list):
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
-    # Define grid parameters - 5 columns
-    cols = 5
-    rows = 4  # Typically 4 rows per page for letter size
-    margin = 0.5 * inch  # Margin around the page
+    # Use 3 columns instead of 4 for bigger images
+    cols = 4
+    # Keep 4 rows
+    rows = 4
+    # Margin around the page
+    margin = 0.5 * inch
 
-    # Calculate QR code size based on available space
+    # Calculate the available cell space
     qr_width = (width - 2 * margin) / cols
     qr_height = (height - 2 * margin) / rows
 
-    # Make QR codes square using the smaller dimension
+    # The actual QR code is square
     qr_size = min(qr_width, qr_height)
 
-    # Center the grid on the page
+    # Center the grid horizontally
     x_start = margin + (width - 2 * margin - (cols * qr_size)) / 2
     y_start = height - margin
 
     qr_index = 0
     total_qrs = len(qr_codes)
 
-    while qr_index < total_qrs:
-        # Draw cutting guides - horizontal lines
-        c.setStrokeColorRGB(0.8, 0.8, 0.8)  # Light gray
-        c.setDash([2, 2])  # Dashed line
+    # We'll reduce the padding from 10% down to 5%
+    padding_ratio = 0.05  # 5%
 
-        # Horizontal cutting guides
+    while qr_index < total_qrs:
+        # Draw dashed cutting guides
+        c.setStrokeColorRGB(0.8, 0.8, 0.8)  # Light gray
+        c.setDash([2, 2])
+
+        # Horizontal lines
         for row in range(rows + 1):
             y_line = height - margin - (row * qr_size)
             c.line(margin, y_line, width - margin, y_line)
 
-        # Vertical cutting guides
+        # Vertical lines
         for col in range(cols + 1):
             x_line = x_start + (col * qr_size)
             c.line(x_line, margin, x_line, height - margin)
 
-        # Draw QR codes
+        # Draw each QR code
         for row in range(rows):
             for col in range(cols):
                 if qr_index >= total_qrs:
@@ -362,21 +365,21 @@ def generate_qr_pdf_report_by_list(qr_code_list):
 
                 qr = qr_codes[qr_index]
 
-                # Calculate position for this QR code
+                # Position for this cell
                 x = x_start + (col * qr_size)
                 y = y_start - (row * qr_size)
 
-                # Convert binary image data to PIL Image
+                # Convert binary to a BytesIO for PIL
                 img_buffer = io.BytesIO(qr["image"])
 
-                # Add a small padding (10% of QR size) within each cell
-                padding = qr_size * 0.1
+                # Use 5% padding inside each cell
+                pad = qr_size * padding_ratio
                 c.drawImage(
                     ImageReader(img_buffer),
-                    x + padding,
-                    y - qr_size + padding,
-                    width=qr_size - (2 * padding),
-                    height=qr_size - (2 * padding)
+                    x + pad,
+                    y - qr_size + pad,
+                    width=qr_size - 2 * pad,
+                    height=qr_size - 2 * pad
                 )
 
                 qr_index += 1
@@ -384,7 +387,7 @@ def generate_qr_pdf_report_by_list(qr_code_list):
             if qr_index >= total_qrs:
                 break
 
-        # Start a new page if there are more QR codes
+        # If there are more QRs left, move to a new page
         if qr_index < total_qrs:
             c.showPage()
             y_start = height - margin
