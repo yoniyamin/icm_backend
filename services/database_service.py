@@ -96,7 +96,7 @@ def get_books(order_by="desc"):
                 FROM books
                 LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
                 LEFT JOIN members ON loans.member_id = members.id
-                ORDER BY books.created_at {order_clause}
+                ORDER BY books.title {order_clause}
             """)
 
             books = cursor.fetchall()
@@ -560,7 +560,7 @@ def get_members():
                 LEFT JOIN loans l 
                     ON m.id = l.member_id AND l.returned_at IS NULL
                 GROUP BY m.id
-                ORDER BY borrowed_books_count DESC, m.created_at DESC
+                ORDER BY borrowed_books_count DESC, m.parent_name DESC
             """)
             return cursor.fetchall()
 
@@ -629,6 +629,7 @@ def get_books_by_status(param):
                     WHERE books.id NOT IN (
                         SELECT book_id FROM loans WHERE returned_at IS NULL
                     )
+                    order by books.title asc
                 """)
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
