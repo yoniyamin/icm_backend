@@ -411,35 +411,31 @@ def get_book_loans(book_id):
             loans = cursor.fetchall()
             return [dict(loan) for loan in loans]
 
+
 def borrow_book(qr_code, member_id, borrowed_date, book_state):
     with get_postgres_connection() as conn:
         with conn.cursor() as cursor:
-            # Lookup book_id from qr_code
+            # Get the book by QR code
             cursor.execute("SELECT id FROM books WHERE qr_code = %s", (qr_code,))
             book = cursor.fetchone()
-
             if not book:
-                return False
+                return False  # Book not found
+            book_id = book['id']
 
-            book_id = book['id']  # Use dictionary key 'id' instead of index 0
+            # Check for existing active loans
+            cursor.execute("SELECT COUNT(*) FROM loans WHERE book_id = %s AND returned_at IS NULL", (book_id,))
+            if cursor.fetchone()['count'] > 0:
+                return False  # Book is already borrowed
 
-            # Insert a new loan record
+            # Create the new loan
             cursor.execute("""
-                INSERT INTO loans (book_id, member_id, borrowed_at, book_state)
-                VALUES (%s, %s, %s, %s)
-            """, (book_id, member_id, borrowed_date, book_state))
+                           INSERT INTO loans (book_id, member_id, borrowed_at, book_state)
+                           VALUES (%s, %s, %s, %s)
+                           """, (book_id, member_id, borrowed_date, book_state))
 
-            # Update the loan_status in the books table to 'borrowed'
-            cursor.execute("""
-                UPDATE books SET loan_status = 'borrowed' WHERE id = %s
-            """, (book_id,))
-
-            try:
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                return False
-
+            # Update book status
+            cursor.execute("UPDATE books SET loan_status = 'borrowed' WHERE id = %s", (book_id,))
+            conn.commit()
     return True
 
 
@@ -499,39 +495,60 @@ def update_book(book_id, **kwargs):
 def return_book(qr_code):
     with get_postgres_connection() as conn:
         with conn.cursor() as cursor:
+            # Check if book exists
             cursor.execute("SELECT id FROM books WHERE qr_code = %s", (qr_code,))
             book = cursor.fetchone()
             if not book:
                 return {"success": False, "message": "Book not found"}
             book_id = book['id']
+
             try:
+                # Update all active loans
                 cursor.execute("""
-                    UPDATE loans 
-                    SET returned_at = CURRENT_TIMESTAMP 
-                    WHERE book_id = %s AND returned_at IS NULL
-                """, (book_id,))
+                               UPDATE loans
+                               SET returned_at = CURRENT_TIMESTAMP
+                               WHERE book_id = %s
+                                 AND returned_at IS NULL
+                               """, (book_id,))
+                updated_loans = cursor.rowcount  # Capture number of loans updated
+
+                # Check remaining active loans
                 cursor.execute("""
-                    SELECT COUNT(*) FROM loans WHERE book_id = %s AND returned_at IS NULL
-                """, (book_id,))
+                               SELECT COUNT(*)
+                               FROM loans
+                               WHERE book_id = %s
+                                 AND returned_at IS NULL
+                               """, (book_id,))
                 active_loans_count = cursor.fetchone()['count']
+
+                # Update book status if no active loans remain
                 if active_loans_count == 0:
                     cursor.execute("""
-                        UPDATE books SET loan_status = 'available' WHERE id = %s
-                    """, (book_id,))
+                                   UPDATE books
+                                   SET loan_status = 'available'
+                                   WHERE id = %s
+                                   """, (book_id,))
                 conn.commit()
+
+                # Return detailed success message
+                if updated_loans > 0:
+                    return {"success": True, "message": f"Book returned successfully. {updated_loans} loan(s) closed."}
+                else:
+                    return {"success": True, "message": "No active loans to return for this book."}
+
             except Exception as e:
                 conn.rollback()
-                # Fallback: Sync status to prevent inconsistency
+                # Fallback: Sync book status
                 cursor.execute("""
-                    UPDATE books 
-                    SET loan_status = 'available'
-                    WHERE id = %s AND id NOT IN (
-                        SELECT book_id FROM loans WHERE returned_at IS NULL
-                    )
-                """, (book_id,))
+                               UPDATE books
+                               SET loan_status = 'available'
+                               WHERE id = %s
+                                 AND id NOT IN (SELECT book_id
+                                                FROM loans
+                                                WHERE returned_at IS NULL)
+                               """, (book_id,))
                 conn.commit()
                 return {"success": False, "message": f"Error returning book, status corrected: {str(e)}"}
-    return {"success": True, "message": "Book returned successfully"}
 
 
 def get_members():
