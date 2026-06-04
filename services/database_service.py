@@ -1089,18 +1089,33 @@ def delete_qr_code(qr_code_path):
         print(f"Failed to delete orphaned QR code {qr_code_path}: {str(e)}")
 
 
-def get_member_loans(member_id):
-    """Retrieve books currently borrowed by a member."""
+def get_member_by_id(member_id):
     with get_postgres_connection() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute("SELECT * FROM members WHERE id = %s", (member_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+
+def find_email_by_member_id(member_id):
+    member = get_member_by_id(member_id)
+    if member and member.get("email"):
+        return member["email"]
+    return None
+
+
+def get_member_loans(member_id):
+    """Retrieve open loans for a member (includes loan id for reminders)."""
+    with get_postgres_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute('''
-                SELECT books.title, loans.borrowed_at
+                SELECT loans.id, books.title AS book_title, loans.borrowed_at
                 FROM loans
                 JOIN books ON loans.book_id = books.id
                 WHERE loans.member_id = %s AND loans.returned_at IS NULL
+                ORDER BY loans.borrowed_at DESC
             ''', (member_id,))
-            loans = cursor.fetchall()
-            return [{"book_title": loan[0], "borrowed_at": loan[1]} for loan in loans]
+            return [dict(row) for row in cursor.fetchall()]
 
 
 def get_member_borrowed_books_count(member_id):

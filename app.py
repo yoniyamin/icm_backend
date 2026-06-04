@@ -98,18 +98,18 @@ def login():
 def send_email(to_email, subject, loan_details, language='en'):
     """
     Send an email using SendGrid API with language-specific template.
+    Returns (success: bool, error_message: str | None).
     """
     template = get_reminder_template(language)
     try:
-        if 'borrowed_at' in loan_details:
-            loan_details['borrowed_at'] = datetime.strptime(loan_details['borrowed_at'],
-                '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d')
-        body = template.format(**loan_details)
+        details = dict(loan_details)
+        if 'borrowed_at' in details:
+            details['borrowed_at'] = format_borrowed_date(details['borrowed_at'])
+        body = template.format(**details).replace('\n', '<br>')
     except Exception as e:
         print(f"Template formatting failed: {e}. Loan details: {loan_details}")
-        return False
+        return False, f"Email template error: {e}"
 
-    # Apply RTL styles for Hebrew emails
     if language == 'he':
         body = f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
     else:
@@ -119,16 +119,98 @@ def send_email(to_email, subject, loan_details, language='en'):
         from_email='icm.library.reminder@gmail.com',
         to_emails=to_email,
         subject=subject,
-        html_content=body  # Ensure SendGrid renders it as HTML
+        html_content=body,
     )
     try:
         sg = SendGridAPIClient(os.getenv('SENDGRID_API_KEY'))
         response = sg.send(message)
         print(f"Email sent successfully to {to_email} with status {response.status_code}")
-        return True
+        return True, None
     except Exception as e:
         print(f"Failed to send email: {e}")
-        return False
+        return False, f"SendGrid error: {e}"
+
+
+MEMBER_REMINDER_TEMPLATES = {
+    "en": """Dear {borrower_name},<br><br>
+Please return the following borrowed books:<br><br>
+{books_list}<br><br>
+Other children may be waiting for them. Thank you!<br><br>
+ICM Library Staff""",
+    "he": """שלום {borrower_name},<br><br>
+הגיע הזמן להחזיר את הספרים הבאים:<br><br>
+{books_list}<br><br>
+ילדים אחרים מחכים להם. תודה!<br><br>
+צוות ספריית הקהילה הישראלית במדריד""",
+}
+
+
+def format_borrowed_date(borrowed_at):
+    if not borrowed_at:
+        return ""
+    if hasattr(borrowed_at, "strftime"):
+        return borrowed_at.strftime("%Y-%m-%d")
+    borrowed_str = str(borrowed_at).strip()
+    if "T" in borrowed_str:
+        try:
+            iso = borrowed_str.replace("Z", "+00:00")
+            if "+" not in iso and "-" not in iso[10:]:
+                iso = iso.split(".")[0]
+            return datetime.fromisoformat(iso).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(borrowed_str, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    if len(borrowed_str) >= 10 and borrowed_str[4] == "-":
+        return borrowed_str[:10]
+    return borrowed_str
+
+
+def build_books_list_html(loans, language="en"):
+    lines = []
+    for loan in loans:
+        date_str = format_borrowed_date(loan.get("borrowed_at"))
+        title = loan.get("book_title", "")
+        if language == "he":
+            lines.append(f"- {title} (הושאל ב-{date_str})")
+        else:
+            lines.append(f"- {title} (borrowed {date_str})")
+    return "<br>".join(lines)
+
+
+def send_member_email(to_email, subject, borrower_name, loans, language="en"):
+    try:
+        template = MEMBER_REMINDER_TEMPLATES.get(language, MEMBER_REMINDER_TEMPLATES["en"])
+        body = template.format(
+            borrower_name=borrower_name,
+            books_list=build_books_list_html(loans, language),
+        )
+    except Exception as e:
+        print(f"Member reminder template failed: {e}")
+        return False, f"Email template error: {e}"
+
+    if language == "he":
+        body = f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
+    else:
+        body = f'<div dir="ltr" style="text-align: left; font-family: Arial, sans-serif;">{body}</div>'
+
+    message = Mail(
+        from_email='icm.library.reminder@gmail.com',
+        to_emails=to_email,
+        subject=subject,
+        html_content=body,
+    )
+    try:
+        sg = SendGridAPIClient(os.getenv('SENDGRID_API_KEY'))
+        response = sg.send(message)
+        print(f"Member reminder sent to {to_email} with status {response.status_code}")
+        return True, None
+    except Exception as e:
+        print(f"Failed to send member reminder: {e}")
+        return False, f"SendGrid error: {e}"
 
 
 @app.route('/api/qr_codes/<qr_code_value>', methods=['GET'])
@@ -418,6 +500,65 @@ def inventory_report():
     return send_file(report_filename, as_attachment=True)
 
 
+@app.route('/api/send-member-reminder', methods=['POST'])
+@token_required
+def send_member_reminder():
+    try:
+        data = request.json or {}
+        member_id = data.get("member_id")
+        if not member_id:
+            return jsonify({"success": False, "error": "member_id is required"}), 400
+
+        member = db.get_member_by_id(member_id)
+        if not member:
+            return jsonify({"success": False, "error": "Member not found"}), 404
+
+        open_loans = db.get_member_loans(member_id)
+        if not open_loans:
+            return jsonify({"success": False, "error": "No borrowed books"}), 400
+
+        eligible_loans = [
+            loan for loan in open_loans
+            if not db.check_recent_reminder(loan["id"], days=14)
+        ]
+        if not eligible_loans:
+            return jsonify({
+                "success": False,
+                "error": "Reminder already sent recently for all borrowed books",
+            }), 400
+
+        email = db.find_email_by_member_id(member_id)
+        if not email:
+            return jsonify({"success": False, "error": "No email found for member"}), 404
+
+        language = data.get("language", "en")
+        subject = data.get("subject", "Book Return Reminder")
+        borrower_name = member.get("parent_name") or member.get("kid_name")
+
+        success, send_error = send_member_email(email, subject, borrower_name, open_loans, language)
+        if not success:
+            return jsonify({
+                "success": False,
+                "error": send_error or f"Failed to send email to {email}",
+            }), 500
+
+        for loan in open_loans:
+            try:
+                db.record_reminder(loan["id"])
+            except Exception as e:
+                print(f"Error recording reminder for loan_id {loan['id']}: {e}")
+
+        return jsonify({
+            "success": True,
+            "message": f"Email sent to {email}",
+            "book_count": len(open_loans),
+            "mode": "combined",
+        })
+    except Exception as e:
+        print(f"Error sending member reminder: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/send-reminder', methods=['POST'])
 @token_required
 def send_reminder():
@@ -454,7 +595,7 @@ def send_reminder():
             return jsonify({"success": False, "error": "No email found for borrower"}), 404
 
         subject = data.get('subject', 'Reminder')
-        success = send_email(email, subject, loan_details, language)
+        success, send_error = send_email(email, subject, loan_details, language)
 
         if success:
             try:
@@ -465,7 +606,10 @@ def send_reminder():
 
             return jsonify({"success": True, "message": f"Email sent to {email}"})
         else:
-            return jsonify({"success": False, "error": f"Failed to send email to {email}"}), 500
+            return jsonify({
+                "success": False,
+                "error": send_error or f"Failed to send email to {email}",
+            }), 500
 
     except Exception as e:
         print(f"Error sending reminder: {e}")

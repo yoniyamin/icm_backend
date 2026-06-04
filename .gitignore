@@ -3,3 +3,6 @@ db_hospital
 venv
 .idea
 /database.db
+.idea/backend.iml
+__pycache__/app.cpython-312.pyc
+run
