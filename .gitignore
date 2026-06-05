@@ -6,3 +6,4 @@ venv
 .idea/backend.iml
 __pycache__/app.cpython-312.pyc
 run
+migrate_sqlite_to_postgres.py
