@@ -283,12 +283,21 @@ def get_all_qr_codes_with_title():
             # so that if a qr_code in 'qr_codes' doesn't have an entry in 'books', it still shows up.
             cursor.execute("""
                 SELECT qr_codes.qr_code,
-                       books.title
+                       books.title,
+                       COALESCE(books.created_at, books.updated_at) AS created_at
                 FROM qr_codes
                 LEFT JOIN books ON qr_codes.qr_code = books.qr_code
                 ORDER BY qr_codes.qr_code
             """)
-            return cursor.fetchall()
+            rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                created_at = item.get("created_at")
+                if created_at is not None:
+                    item["created_at"] = created_at.isoformat()
+                result.append(item)
+            return result
 
 
 def generate_qr_pdf_report_by_list(qr_code_list):
