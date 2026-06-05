@@ -271,16 +271,17 @@ def generate_qr_code_with_logo(qr_code, title):
 
 def get_all_qr_codes_with_title(from_date=None, to_date=None):
     """
-    Return a list of dicts: [
-      { 'qr_code': ..., 'title': ..., 'created_at': ... },
-      ...
-    ]
-    including the book's title if it exists.
+    Return a list of dicts for every book with a QR code assigned.
+    Uses books as the source of truth so newly added books always appear,
+    even if the qr_codes image row is missing.
     Optional from_date/to_date (YYYY-MM-DD strings) filter by book added date.
     """
     with get_postgres_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            conditions = []
+            conditions = [
+                "books.qr_code IS NOT NULL",
+                "books.qr_code <> 'temp_qr_code'",
+            ]
             params = []
 
             if from_date:
@@ -295,16 +296,17 @@ def get_all_qr_codes_with_title(from_date=None, to_date=None):
                 )
                 params.append(to_date)
 
-            where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            where_clause = " AND ".join(conditions)
 
             cursor.execute(f"""
-                SELECT qr_codes.qr_code,
+                SELECT books.qr_code,
                        books.title,
-                       COALESCE(books.created_at, books.updated_at) AS created_at
-                FROM qr_codes
-                LEFT JOIN books ON qr_codes.qr_code = books.qr_code
-                {where_clause}
-                ORDER BY qr_codes.qr_code
+                       COALESCE(books.created_at, books.updated_at) AS created_at,
+                       (qr_codes.qr_code IS NOT NULL) AS has_qr_image
+                FROM books
+                LEFT JOIN qr_codes ON books.qr_code = qr_codes.qr_code
+                WHERE {where_clause}
+                ORDER BY books.id
             """, tuple(params))
             rows = cursor.fetchall()
             result = []
