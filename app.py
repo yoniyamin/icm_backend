@@ -1,5 +1,9 @@
 # app.py
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
 from io import BytesIO
 import sqlite3
 
@@ -12,8 +16,6 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import models
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 from services import database_service as db
 from flask_bcrypt import Bcrypt
 from functools import wraps
@@ -94,10 +96,49 @@ def login():
         return jsonify({"message": "Invalid username or password"}), 401
 
 
+def get_gmail_credentials():
+    """Gmail address + app password (not the regular account password)."""
+    user = os.getenv("GMAIL_USER", "icm.library.reminder@gmail.com")
+    password = (os.getenv("GMAIL_APP_PASSWORD") or "").replace(" ", "")
+    return user, password
+
+
+def send_html_email(to_email, subject, html_body):
+    """Send HTML email via Gmail SMTP. Returns (success, error_message)."""
+    gmail_user, gmail_password = get_gmail_credentials()
+    if not gmail_password:
+        return False, "GMAIL_APP_PASSWORD is not configured"
+
+    from_name = os.getenv("GMAIL_FROM_NAME", "ICM Library")
+    message = MIMEMultipart("alternative")
+    message["Subject"] = subject
+    message["From"] = formataddr((from_name, gmail_user))
+    message["To"] = to_email
+    message.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(gmail_user, gmail_password)
+            server.sendmail(gmail_user, [to_email], message.as_string())
+        print(f"Email sent via Gmail SMTP to {to_email}")
+        return True, None
+    except Exception as e:
+        print(f"Gmail SMTP send failed: {e}")
+        return False, f"Gmail SMTP error: {e}"
+
+
+def wrap_email_html(body, language="en"):
+    if language == "he":
+        return f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
+    return f'<div dir="ltr" style="text-align: left; font-family: Arial, sans-serif;">{body}</div>'
+
 
 def send_email(to_email, subject, loan_details, language='en'):
     """
-    Send an email using SendGrid API with language-specific template.
+    Send a book-return reminder via Gmail SMTP.
     Returns (success: bool, error_message: str | None).
     """
     template = get_reminder_template(language)
@@ -110,25 +151,7 @@ def send_email(to_email, subject, loan_details, language='en'):
         print(f"Template formatting failed: {e}. Loan details: {loan_details}")
         return False, f"Email template error: {e}"
 
-    if language == 'he':
-        body = f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
-    else:
-        body = f'<div dir="ltr" style="text-align: left; font-family: Arial, sans-serif;">{body}</div>'
-
-    message = Mail(
-        from_email='icm.library.reminder@gmail.com',
-        to_emails=to_email,
-        subject=subject,
-        html_content=body,
-    )
-    try:
-        sg = SendGridAPIClient(os.getenv('SENDGRID_API_KEY'))
-        response = sg.send(message)
-        print(f"Email sent successfully to {to_email} with status {response.status_code}")
-        return True, None
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-        return False, f"SendGrid error: {e}"
+    return send_html_email(to_email, subject, wrap_email_html(body, language))
 
 
 MEMBER_REMINDER_TEMPLATES = {
@@ -192,25 +215,7 @@ def send_member_email(to_email, subject, borrower_name, loans, language="en"):
         print(f"Member reminder template failed: {e}")
         return False, f"Email template error: {e}"
 
-    if language == "he":
-        body = f'<div dir="rtl" style="text-align: right; font-family: Arial, sans-serif;">{body}</div>'
-    else:
-        body = f'<div dir="ltr" style="text-align: left; font-family: Arial, sans-serif;">{body}</div>'
-
-    message = Mail(
-        from_email='icm.library.reminder@gmail.com',
-        to_emails=to_email,
-        subject=subject,
-        html_content=body,
-    )
-    try:
-        sg = SendGridAPIClient(os.getenv('SENDGRID_API_KEY'))
-        response = sg.send(message)
-        print(f"Member reminder sent to {to_email} with status {response.status_code}")
-        return True, None
-    except Exception as e:
-        print(f"Failed to send member reminder: {e}")
-        return False, f"SendGrid error: {e}"
+    return send_html_email(to_email, subject, wrap_email_html(body, language))
 
 
 @app.route('/api/qr_codes/<qr_code_value>', methods=['GET'])
