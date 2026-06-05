@@ -730,8 +730,9 @@ def qr_codes_pdf_report():
 @token_required
 def get_qr_codes_with_titles():
     try:
-        qr_codes_data = db.get_all_qr_codes_with_title()  # The function we showed above
-        # Return as JSON
+        from_date = request.args.get('from_date')
+        to_date = request.args.get('to_date')
+        qr_codes_data = db.get_all_qr_codes_with_title(from_date=from_date, to_date=to_date)
         return jsonify(qr_codes_data), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400

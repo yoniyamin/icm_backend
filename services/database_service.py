@@ -269,26 +269,43 @@ def generate_qr_code_with_logo(qr_code, title):
     print(f"Generated QR code for {qr_code}, image size in bytes: {len(image_data)}")
     return image_data
 
-def get_all_qr_codes_with_title():
+def get_all_qr_codes_with_title(from_date=None, to_date=None):
     """
     Return a list of dicts: [
-      { 'qr_code': ..., 'title': ..., 'image': ... },
+      { 'qr_code': ..., 'title': ..., 'created_at': ... },
       ...
     ]
     including the book's title if it exists.
+    Optional from_date/to_date (YYYY-MM-DD strings) filter by book added date.
     """
     with get_postgres_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            # We LEFT JOIN books on matching qr_code
-            # so that if a qr_code in 'qr_codes' doesn't have an entry in 'books', it still shows up.
-            cursor.execute("""
+            conditions = []
+            params = []
+
+            if from_date:
+                conditions.append(
+                    "COALESCE(books.created_at, books.updated_at) >= %s::date"
+                )
+                params.append(from_date)
+
+            if to_date:
+                conditions.append(
+                    "COALESCE(books.created_at, books.updated_at) < (%s::date + INTERVAL '1 day')"
+                )
+                params.append(to_date)
+
+            where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+            cursor.execute(f"""
                 SELECT qr_codes.qr_code,
                        books.title,
                        COALESCE(books.created_at, books.updated_at) AS created_at
                 FROM qr_codes
                 LEFT JOIN books ON qr_codes.qr_code = books.qr_code
+                {where_clause}
                 ORDER BY qr_codes.qr_code
-            """)
+            """, tuple(params))
             rows = cursor.fetchall()
             result = []
             for row in rows:
