@@ -85,18 +85,21 @@ def get_books(order_by="desc"):
             order_clause = "DESC" if order_by.lower() == "desc" else "ASC"
 
             cursor.execute(f"""
-                SELECT 
-                    books.*,
-                    COALESCE(loans.borrowed_at, NULL) AS borrowed_at,
-                    COALESCE(members.parent_name, NULL) AS borrowing_child,
-                    CASE 
-                        WHEN loans.id IS NOT NULL THEN 'borrowed'
+                SELECT
+                    b.*,
+                    COUNT(l.id) AS borrow_count,
+                    MAX(open_loan.borrowed_at) AS borrowed_at,
+                    MAX(members.parent_name) AS borrowing_child,
+                    CASE
+                        WHEN BOOL_OR(open_loan.id IS NOT NULL) THEN 'borrowed'
                         ELSE 'available'
                     END AS loan_status
-                FROM books
-                LEFT JOIN loans ON books.id = loans.book_id AND loans.returned_at IS NULL
-                LEFT JOIN members ON loans.member_id = members.id
-                ORDER BY books.title {order_clause}
+                FROM books b
+                LEFT JOIN loans l ON l.book_id = b.id
+                LEFT JOIN loans open_loan ON b.id = open_loan.book_id AND open_loan.returned_at IS NULL
+                LEFT JOIN members ON open_loan.member_id = members.id
+                GROUP BY b.id
+                ORDER BY b.title {order_clause}
             """)
 
             books = cursor.fetchall()
